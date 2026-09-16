@@ -46,3 +46,6 @@ runs/*/val/
 !runs/train/belt_damage_improved/
 !runs/train/belt_damage_improved/weights/
 !runs/train/belt_damage_improved/weights/best.pt
+
+# Video test files
+test_videos/

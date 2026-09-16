@@ -84,11 +84,40 @@ st.markdown(
         color: #64748b !important;
     }
 
-    /* Form controls */
+    /* Form controls - high contrast and readable */
     section[data-testid="stMain"] input,
     section[data-testid="stMain"] textarea,
-    section[data-testid="stMain"] [data-baseweb="input"] input {
+    section[data-testid="stMain"] [data-baseweb="input"] input,
+    section[data-testid="stMain"] [data-baseweb="base-input"] input {
         color: #0f172a !important;
+        -webkit-text-fill-color: #0f172a !important;
+        background-color: #ffffff !important;
+        caret-color: #2563eb !important;
+        opacity: 1 !important;
+    }
+
+    section[data-testid="stMain"] [data-baseweb="input"],
+    section[data-testid="stMain"] [data-baseweb="base-input"],
+    section[data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"] {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 10px !important;
+        box-shadow: none !important;
+    }
+
+    section[data-testid="stMain"] [data-testid="stNumberInput"] button {
+        color: #334155 !important;
+        background: #f8fafc !important;
+        border-color: #e2e8f0 !important;
+    }
+
+    section[data-testid="stMain"] [data-testid="stNumberInput"] button:hover {
+        background: #e2e8f0 !important;
+    }
+
+    section[data-testid="stMain"] [data-testid="stNumberInput"] input::placeholder {
+        color: #94a3b8 !important;
+        -webkit-text-fill-color: #94a3b8 !important;
     }
 
     /* Keep info/success/warning/error boxes readable */
@@ -303,12 +332,56 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ============================================================
+# SYSTEM STATUS
+# ============================================================
+
+status_cols = st.columns(3)
+
+with status_cols[0]:
+    st.markdown(
+        '''
+        <div class="status-card">
+            <div class="status-label">Inspection Engine</div>
+            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
+            <div style="color:#64748b;font-size:0.82rem;">YOLOv8 defect detection</div>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
+
+with status_cols[1]:
+    st.markdown(
+        '''
+        <div class="status-card">
+            <div class="status-label">Anomaly Detector</div>
+            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
+            <div style="color:#64748b;font-size:0.82rem;">ROI autoencoder analysis</div>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
+
+with status_cols[2]:
+    st.markdown(
+        '''
+        <div class="status-card">
+            <div class="status-label">Risk Model</div>
+            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
+            <div style="color:#64748b;font-size:0.82rem;">XGBoost + SHAP benchmark</div>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
+
+st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+
 st.markdown(
-    '<div class="section-title">📤 Conveyor Belt Inspection</div>',
+    '<div class="section-title">📤 Inspection Console</div>',
     unsafe_allow_html=True
 )
 st.markdown(
-    '<div class="section-subtitle">Upload an inspection image to begin AI-assisted analysis.</div>',
+    '<div class="section-subtitle">Upload a conveyor-belt inspection image and run the AI analysis pipeline.</div>',
     unsafe_allow_html=True
 )
 
@@ -941,9 +1014,9 @@ if uploaded_file is not None:
         # PREDICTIVE MAINTENANCE / FAILURE RISK
         # =================================================
 
-        st.markdown('<div class="section-title">🔮 Predictive Maintenance — Failure Risk</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">🔮 Predictive Maintenance Analytics</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-subtitle">Optional sensor-based benchmark for complementary failure-risk analysis.</div>',
+            '<div class="section-subtitle">Complementary sensor-based failure-risk benchmark with local model explainability.</div>',
             unsafe_allow_html=True
         )
 
@@ -1499,6 +1572,102 @@ if uploaded_file is not None:
 
 
         # ============================================================
+        # HOW BELTGUARD WORKS
+        # ============================================================
+
+        st.markdown("---")
+        st.markdown(
+            '<div class="section-title">🧭 How BeltGuard Works</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            '<div class="section-subtitle">A layered AI workflow for conveyor-belt inspection and maintenance decision support.</div>',
+            unsafe_allow_html=True
+        )
+
+        with st.expander("View the BeltGuard inspection workflow", expanded=False):
+            wf1, wf2, wf3 = st.columns(3)
+
+            with wf1:
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>1. Visual Inspection</b><br>
+                        <span style="color:#64748b;">
+                        Upload a conveyor image and detect visible belt defects using the trained YOLOv8 model.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>2. Defect Classification</b><br>
+                        <span style="color:#64748b;">
+                        Identify detected regions as scratch or edge damage and estimate a visual severity level.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+
+            with wf2:
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>3. Visual Anomaly Analysis</b><br>
+                        <span style="color:#64748b;">
+                        The ROI convolutional autoencoder compares belt appearance against learned visual patterns using reconstruction error.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>4. Condition Scoring</b><br>
+                        <span style="color:#64748b;">
+                        Defect burden, visual severity and anomaly evidence are combined into a normalized visual condition score.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+
+            with wf3:
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>5. Maintenance Decision Support</b><br>
+                        <span style="color:#64748b;">
+                        Inspection findings are translated into monitor, schedule-inspection or immediate-inspection guidance.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    '''
+                    <div class="info-card">
+                        <b>6. Sensor-Risk Benchmark</b><br>
+                        <span style="color:#64748b;">
+                        Optional operating values are evaluated by a separate XGBoost model and explained with SHAP.
+                        </span>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+
+            st.info(
+                "Deployment note: the current application performs image-based inspection on uploaded images. "
+                "The XGBoost failure-risk component is a separate sensor-based benchmark and does not derive sensor values from the image. "
+                "This application should therefore be described as AI-assisted inspection and maintenance decision support, "
+                "not as a live equipment sensor system or RUL predictor."
+            )
+
+        # ============================================================
 # FOOTER
 # ============================================================
 
@@ -1509,6 +1678,8 @@ st.markdown(
     <div class="belt-footer">
         <b>BeltGuard</b> · AI-Based Conveyor Belt Inspection &nbsp;|&nbsp;
         YOLOv8 · ROI Autoencoder · XGBoost · SHAP
+        <br>
+        <span style="font-size:0.75rem;">AI-assisted inspection and maintenance decision support</span>
     </div>
     """,
     unsafe_allow_html=True
