@@ -1,5 +1,14 @@
+streamlit
 ultralytics==8.4.96
-opencv-python-headless==5.0.0.93
+torch
+torchvision
+opencv-python-headless
 numpy==2.0.2
-pillow==10.4.0
+Pillow==10.4.0
 PyYAML==6.0.3
+pandas
+matplotlib
+scikit-learn
+xgboost
+shap
+joblib

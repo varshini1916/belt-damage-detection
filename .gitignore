@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temporary files
+*.log
+*.tmp
+
+# Python cache files
+*.cache
+
+# Generated outputs
+outputs/
+*.png
+
+# Dataset images and raw datasets
+training_data/images/
+dataset_v2/images/
+predictive_maintenance/ai4i2020.csv
+
+# Training checkpoints except the final best model
+runs/*/weights/last.pt
+runs/*/weights/best.pt
+runs/*/predict/
+runs/*/val/
+
+# Keep the final trained YOLO model
+!runs/
+!runs/train/
+!runs/train/belt_damage_improved/
+!runs/train/belt_damage_improved/weights/
+!runs/train/belt_damage_improved/weights/best.pt
