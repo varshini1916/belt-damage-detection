@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+from datetime import datetime
 
 import streamlit as st
 from PIL import Image
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(
     page_title="BeltGuard",
-    page_icon="🔧",
+    page_icon="B",
     layout="wide"
 )
 
@@ -32,286 +33,193 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Main application */
-    .stApp {
-        background: #f5f7fb;
+    :root {
+        --ink: #0b1220;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --panel: #ffffff;
+        --bg: #f4f7fa;
+        --navy: #0b1728;
+        --navy-2: #10243a;
+        --accent: #0f766e;
+        --accent-2: #14b8a6;
     }
 
+    html, body, .stApp {
+        font-family: "Segoe UI", "Inter", Arial, sans-serif !important;
+    }
+
+    .stApp { background: var(--bg); }
     .main .block-container {
-        max-width: 1400px;
-        padding-top: 2rem;
-        padding-bottom: 3rem;
+        max-width: 1480px;
+        padding-top: 1.15rem;
+        padding-bottom: 3.5rem;
     }
 
-    /* Sidebar */
+    /* Industrial control-room sidebar */
     section[data-testid="stSidebar"] {
-        background: #111827;
-        border-right: 1px solid #243044;
+        background: linear-gradient(180deg, #081321 0%, #0d1b2d 100%);
+        border-right: 1px solid #1f334b;
     }
-
-    section[data-testid="stSidebar"] * {
-        color: #e5e7eb !important;
+    section[data-testid="stSidebar"] * { color: #dce7f3 !important; }
+    section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+        color: #aebfd2 !important;
+        font-size: .76rem !important;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        font-weight: 700;
     }
+    section[data-testid="stSidebar"] .stSlider > div > div > div { background: #14b8a6; }
 
-    section[data-testid="stSidebar"] .stSlider > div > div > div {
-        background: #60a5fa;
-    }
-
-
-    /* Main content typography - explicit contrast for light dashboard */
+    /* Main typography */
     section[data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
     section[data-testid="stMain"] [data-testid="stMarkdownContainer"] li,
     section[data-testid="stMain"] [data-testid="stMarkdownContainer"] strong,
-    section[data-testid="stMain"] [data-testid="stMarkdownContainer"] em,
     section[data-testid="stMain"] label,
     section[data-testid="stMain"] label p,
-    section[data-testid="stMain"] [data-testid="stWidgetLabel"] p,
-    section[data-testid="stMain"] [data-testid="stWidgetLabel"] label {
-        color: #1e293b !important;
+    section[data-testid="stMain"] [data-testid="stWidgetLabel"] p { color: #233044 !important; }
+    section[data-testid="stMain"] h1, section[data-testid="stMain"] h2,
+    section[data-testid="stMain"] h3, section[data-testid="stMain"] h4 { color: var(--ink) !important; }
+    section[data-testid="stMain"] .section-title { 
+        font-size: 1.12rem !important;
+        line-height: 1.35 !important;
     }
-
-    section[data-testid="stMain"] h1,
-    section[data-testid="stMain"] h2,
-    section[data-testid="stMain"] h3,
-    section[data-testid="stMain"] h4,
-    section[data-testid="stMain"] h5,
-    section[data-testid="stMain"] h6 {
-        color: #0f172a !important;
+    section[data-testid="stMain"] .section-subtitle {
+        font-size: 0.84rem !important;
+        line-height: 1.5 !important;
+        color: #66788c !important;
     }
-
     section[data-testid="stMain"] [data-testid="stCaptionContainer"],
-    section[data-testid="stMain"] [data-testid="stCaptionContainer"] p {
-        color: #64748b !important;
-    }
+    section[data-testid="stMain"] [data-testid="stCaptionContainer"] p { color: var(--muted) !important; }
 
-    /* Form controls - high contrast and readable */
-    section[data-testid="stMain"] input,
-    section[data-testid="stMain"] textarea,
-    section[data-testid="stMain"] [data-baseweb="input"] input,
-    section[data-testid="stMain"] [data-baseweb="base-input"] input {
-        color: #0f172a !important;
-        -webkit-text-fill-color: #0f172a !important;
-        background-color: #ffffff !important;
-        caret-color: #2563eb !important;
-        opacity: 1 !important;
+    /* Hero / product masthead */
+    .belt-hero {
+        position: relative;
+        overflow: hidden;
+        background: linear-gradient(112deg, #071321 0%, #0c2137 62%, #0e4f58 100%);
+        padding: 2.15rem 2.15rem 2.05rem;
+        border: 1px solid #17334a;
+        border-radius: 12px;
+        margin-bottom: 1.15rem;
+        box-shadow: 0 14px 34px rgba(8, 19, 33, .12);
+        color: white;
     }
+    .belt-hero:after {
+        content: ""; position: absolute; width: 240px; height: 240px;
+        right: -70px; top: -105px; border-radius: 50%;
+        border: 1px solid rgba(45,212,191,.16);
+        box-shadow: 0 0 0 32px rgba(45,212,191,.035), 0 0 0 64px rgba(45,212,191,.025);
+    }
+    .belt-brandline { display:flex; align-items:center; gap:.7rem; margin-bottom:.85rem; }
+    .belt-kicker { color:#78a7bd; font-size:.68rem; letter-spacing:.14em; font-weight:800; text-transform:uppercase; }
+    .belt-hero h1 { margin:0 !important; font-size:2.65rem; font-weight:800; letter-spacing:-.035em; color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; text-shadow:none !important; }
+    .belt-title-rule { width:58px; height:3px; background:#2dd4bf; border-radius:3px; margin:.72rem 0 .68rem; }
+    .belt-hero p { margin:.0rem 0 0; max-width:820px; color:#d8e7ef !important; -webkit-text-fill-color:#d8e7ef !important; font-size:1.02rem; font-weight:500; line-height:1.6; letter-spacing:.005em; }
+    .belt-hero h1, .belt-hero h1 span, .belt-hero [data-testid="stMarkdownContainer"] h1 { color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; }
+    .belt-live {
+        position:absolute; right:1.35rem; bottom:1.25rem; z-index:2;
+        display:flex; align-items:center; gap:.45rem; color:#b7f7ef;
+        font-size:.68rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+    }
+    .belt-dot { width:7px; height:7px; border-radius:50%; background:#2dd4bf; box-shadow:0 0 0 4px rgba(45,212,191,.12); }
+
+    .ops-strip {
+        display:grid; grid-template-columns:repeat(4,1fr); gap:0;
+        background:#fff; border:1px solid #dbe3ea; border-radius:10px;
+        overflow:hidden; margin:0 0 1.25rem; box-shadow:0 2px 8px rgba(15,23,42,.025);
+    }
+    .ops-strip > div { padding:.72rem .9rem; border-right:1px solid #e5ebf0; }
+    .ops-strip > div:last-child { border-right:0; }
+    .ops-label { display:block; color:#8a98a8; font-size:.62rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase; margin-bottom:.22rem; }
+    .ops-value { color:#253446; font-size:.76rem; font-weight:750; letter-spacing:.03em; }
+    .ops-value.online { color:#0f766e; }
+
+    .section-title { font-size:1.12rem; font-weight:750; color:var(--ink); margin:1.35rem 0 .28rem; letter-spacing:-.01em; }
+    .section-subtitle { color:#66788c !important; font-size:.84rem !important; margin:0 0 .8rem; }
+
+    /* Cards and metrics */
+    div[data-testid="stMetric"] {
+        background:#fff; border:1px solid var(--line); border-radius:10px;
+        padding:.82rem .9rem; box-shadow:0 2px 8px rgba(15,23,42,.035);
+    }
+    div[data-testid="stMetricLabel"] { color:#718096 !important; font-weight:700; font-size:.72rem; text-transform:uppercase; letter-spacing:.055em; }
+    div[data-testid="stMetricValue"] { color:#101827 !important; font-weight:800; font-size:1.45rem; }
+    .info-card, .status-card {
+        background:#fff; border:1px solid var(--line); border-radius:10px;
+        padding:1rem 1.05rem; box-shadow:0 2px 8px rgba(15,23,42,.035);
+    }
+    .info-card { min-height: 138px; }
+    /* Inputs: crisp white industrial controls */
+
 
     section[data-testid="stMain"] [data-baseweb="input"],
-    section[data-testid="stMain"] [data-baseweb="base-input"],
-    section[data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"] {
-        background-color: #ffffff !important;
-        border: 1px solid #cbd5e1 !important;
-        border-radius: 10px !important;
-        box-shadow: none !important;
+    section[data-testid="stMain"] [data-testid="stNumberInputContainer"] {
+        background:#fff !important; border-radius:8px !important;
     }
-
-    section[data-testid="stMain"] [data-testid="stNumberInput"] button {
-        color: #334155 !important;
-        background: #f8fafc !important;
-        border-color: #e2e8f0 !important;
+    section[data-testid="stMain"] [data-baseweb="input"] input,
+    section[data-testid="stMain"] input[type="number"],
+    section[data-testid="stMain"] input[type="text"] {
+        color:#101827 !important; -webkit-text-fill-color:#101827 !important;
+        background:#fff !important; font-weight:600 !important;
     }
-
-    section[data-testid="stMain"] [data-testid="stNumberInput"] button:hover {
-        background: #e2e8f0 !important;
-    }
-
-    section[data-testid="stMain"] [data-testid="stNumberInput"] input::placeholder {
-        color: #94a3b8 !important;
-        -webkit-text-fill-color: #94a3b8 !important;
-    }
-
-    /* Keep info/success/warning/error boxes readable */
-    section[data-testid="stMain"] [data-testid="stAlert"] p,
-    section[data-testid="stMain"] [data-testid="stAlert"] div {
-        color: inherit;
-    }
-
-    /* Sidebar keeps its intentional dark theme */
-    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-    section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
-        color: #e5e7eb !important;
-    }
-
-    /* Hero */
-    .belt-hero {
-        background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 55%, #2563eb 100%);
-        padding: 2rem 2.2rem;
-        border-radius: 18px;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.14);
-        color: white;
-    }
-
-    .belt-hero h1 {
-        margin: 0;
-        font-size: 2.35rem;
-        font-weight: 750;
-        letter-spacing: -0.03em;
-        color: white;
-    }
-
-    .belt-hero p {
-        margin: 0.55rem 0 0;
-        color: #dbeafe;
-        font-size: 1.03rem;
-        line-height: 1.6;
-    }
-
-    .belt-badge {
-        display: inline-block;
-        padding: 0.32rem 0.72rem;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.12);
-        border: 1px solid rgba(255,255,255,0.2);
-        color: #dbeafe;
-        font-size: 0.78rem;
-        font-weight: 650;
-        margin-bottom: 0.8rem;
-    }
-
-    /* Section headings */
-    .section-title {
-        font-size: 1.35rem;
-        font-weight: 720;
-        color: #0f172a;
-        margin: 1.5rem 0 0.75rem;
-    }
-
-    .section-subtitle {
-        color: #64748b;
-        font-size: 0.92rem;
-        margin-top: -0.45rem;
-        margin-bottom: 1rem;
-    }
-
-    /* Metric cards */
-    div[data-testid="stMetric"] {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 14px;
-        padding: 0.95rem 1rem;
-        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
-    }
-
-    div[data-testid="stMetricLabel"] {
-        color: #64748b !important;
-        font-weight: 600;
-    }
-
-    div[data-testid="stMetricValue"] {
-        color: #0f172a !important;
-        font-weight: 750;
-    }
-
-    /* Containers / cards */
-    .info-card {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 16px;
-        padding: 1.15rem 1.25rem;
-        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.045);
-        margin-bottom: 1rem;
-    }
-
-    .status-card {
-        background: white;
-        border-radius: 16px;
-        padding: 1.25rem;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 5px 18px rgba(15, 23, 42, 0.06);
-    }
-
-    .status-label {
-        color: #64748b;
-        font-size: 0.82rem;
-        font-weight: 650;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-    }
-
-    .status-value {
-        color: #0f172a;
-        font-size: 2rem;
-        font-weight: 800;
-        margin-top: 0.2rem;
-    }
-
-    /* Upload area */
-    [data-testid="stFileUploader"] {
-        background: white;
-        border: 1.5px dashed #94a3b8;
-        border-radius: 16px;
-        padding: 0.5rem;
-        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
-    }
+    section[data-testid="stMain"] [data-baseweb="input"] input::placeholder { color:#94a3b8 !important; }
+    section[data-testid="stMain"] [data-testid="stNumberInputStepDown"],
+    section[data-testid="stMain"] [data-testid="stNumberInputStepUp"] { color:#475569 !important; }
 
     /* Buttons */
     .stButton > button {
-        border-radius: 10px;
-        font-weight: 650;
-        min-height: 2.65rem;
-        border: 1px solid #cbd5e1;
-        transition: all 0.15s ease;
+        min-height:2.55rem; border-radius:8px; font-weight:750;
+        border:1px solid #cbd5e1; transition:.16s ease;
     }
+    .stButton > button:hover { transform:translateY(-1px); box-shadow:0 5px 14px rgba(15,23,42,.10); }
+    .stButton > button[kind="primary"] { background:#0f766e !important; color:#fff !important; border-color:#0f766e !important; }
+    .stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span { color:#fff !important; }
 
-    .stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 5px 14px rgba(15, 23, 42, 0.12);
+    /* Tables / alerts */
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+    div[data-testid="stAlert"] { border-radius:9px; border-width:1px; }
+    hr { border:0; border-top:1px solid var(--line); margin:1.25rem 0; }
+
+    .result-banner {
+        display:flex; align-items:center; justify-content:space-between; gap:1rem;
+        background:#f8fafc; border:1px solid #dce5ee; border-radius:10px;
+        padding:.78rem 1rem; margin:.65rem 0 1rem;
     }
+    .result-banner .eyebrow { font-size:.65rem; text-transform:uppercase; letter-spacing:.1em; color:#718096; font-weight:800; }
+    .result-banner .value { font-size:.95rem; color:#0f172a; font-weight:800; margin-top:.15rem; }
+    .priority-chip { display:inline-flex; align-items:center; border-radius:999px; padding:.32rem .62rem; font-size:.66rem; font-weight:800; letter-spacing:.06em; background:#ecfdf5; color:#047857; border:1px solid #a7f3d0; }
+    .footer-line { text-align:center; color:#94a3b8; font-size:.72rem; padding:1.4rem 0 .4rem; letter-spacing:.02em; }
 
-    /* Primary button */
-    .stButton > button[kind="primary"] {
-        background: #2563eb;
-        border-color: #2563eb;
-        color: white;
+    #MainMenu {visibility:hidden;} footer {visibility:hidden;} header {visibility:hidden;}
+
+    /* Keep Streamlit heading anchors from appearing like app icons */
+    section[data-testid="stMain"] [data-testid="stHeaderActionElements"] { display:none !important; }
+    section[data-testid="stMain"] a[href^="#"] { display:none !important; }
+
+    /* Clean number inputs */
+    section[data-testid="stMain"] [data-baseweb="input"] {
+        background:#ffffff !important;
+        border:1px solid #d8e1e8 !important;
+        border-radius:8px !important;
     }
-
-    .stButton > button[kind="primary"] {
-        background: #2563eb !important;
-        color: #ffffff !important;
-        border-color: #2563eb !important;
+    section[data-testid="stMain"] [data-baseweb="input"] input {
+        color:#142235 !important;
+        -webkit-text-fill-color:#142235 !important;
+        background:#ffffff !important;
+        font-size:.92rem !important;
     }
-
-    .stButton > button[kind="primary"] p,
-    .stButton > button[kind="primary"] span {
-        color: #ffffff !important;
-    }
-
-    /* Dataframe */
-    [data-testid="stDataFrame"] {
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        overflow: hidden;
-    }
-
-    /* Alerts */
-    div[data-testid="stAlert"] {
-        border-radius: 12px;
-    }
-
-    /* Dividers */
-    hr {
-        border: none;
-        border-top: 1px solid #e2e8f0;
-        margin: 1.5rem 0;
-    }
-
-    /* Footer */
-    .belt-footer {
-        text-align: center;
-        color: #94a3b8;
-        font-size: 0.82rem;
-        padding: 1.5rem 0 0.5rem;
-    }
-
-    /* Hide Streamlit default decoration */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
     </style>
     """,
     unsafe_allow_html=True
 )
+
+
+# ============================================================
+# SESSION STATUS
+# ============================================================
+
+if "last_inspection_time" not in st.session_state:
+    st.session_state["last_inspection_time"] = None
 
 
 # ============================================================
@@ -321,67 +229,39 @@ st.markdown(
 st.markdown(
     """
     <div class="belt-hero">
-        <div class="belt-badge">AI-POWERED INDUSTRIAL INSPECTION</div>
-        <h1>🔧 BeltGuard</h1>
-        <p>
-            Intelligent conveyor-belt monitoring using visual damage detection,
-            anomaly analysis, severity estimation and maintenance decision support.
-        </p>
+        <div class="belt-brandline">
+            <div class="belt-kicker">Condition Intelligence Platform</div>
+        </div>
+        <h1 style="color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important;">BeltGuard</h1>
+        <div class="belt-title-rule"></div>
+        <p>Conveyor condition intelligence for safer, more reliable operations.</p>
+        <div class="belt-live"><span class="belt-dot"></span> System online</div>
     </div>
     """,
     unsafe_allow_html=True
 )
 
-# ============================================================
-# SYSTEM STATUS
-# ============================================================
-
-status_cols = st.columns(3)
-
-with status_cols[0]:
-    st.markdown(
-        '''
-        <div class="status-card">
-            <div class="status-label">Inspection Engine</div>
-            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
-            <div style="color:#64748b;font-size:0.82rem;">YOLOv8 defect detection</div>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-
-with status_cols[1]:
-    st.markdown(
-        '''
-        <div class="status-card">
-            <div class="status-label">Anomaly Detector</div>
-            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
-            <div style="color:#64748b;font-size:0.82rem;">ROI autoencoder analysis</div>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-
-with status_cols[2]:
-    st.markdown(
-        '''
-        <div class="status-card">
-            <div class="status-label">Risk Model</div>
-            <div class="status-value" style="font-size:1.25rem;">🟢 READY</div>
-            <div style="color:#64748b;font-size:0.82rem;">XGBoost + SHAP benchmark</div>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-
-st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+last_run = st.session_state.get("last_inspection_time")
+last_run_text = last_run.strftime("%d %b %Y · %H:%M") if last_run else "No inspection in this session"
 
 st.markdown(
-    '<div class="section-title">📤 Inspection Console</div>',
+    f"""
+    <div class="ops-strip">
+        <div><span class="ops-label">SERVICE</span><span class="ops-value online">ONLINE</span></div>
+        <div><span class="ops-label">MODE</span><span class="ops-value">IMAGE INSPECTION</span></div>
+        <div><span class="ops-label">LAST INSPECTION</span><span class="ops-value">{last_run_text}</span></div>
+        <div><span class="ops-label">THRESHOLD</span><span class="ops-value">0.24</span></div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="section-title">Inspection workspace</div>',
     unsafe_allow_html=True
 )
 st.markdown(
-    '<div class="section-subtitle">Upload a conveyor-belt inspection image and run the AI analysis pipeline.</div>',
+    '<div class="section-subtitle">Start an inspection, review current belt condition, and record the recommended maintenance action.</div>',
     unsafe_allow_html=True
 )
 
@@ -393,56 +273,44 @@ st.markdown(
 st.sidebar.markdown(
     """
     <div style="padding:0.5rem 0 1.2rem;">
-        <div style="font-size:1.35rem;font-weight:800;color:white;">🔧 BeltGuard</div>
-        <div style="font-size:0.78rem;color:#94a3b8;margin-top:0.2rem;">
-            Conveyor Intelligence Platform
+        <div style="font-size:1.28rem;font-weight:800;color:white;letter-spacing:-.02em;">BELTGUARD</div>
+        <div style="font-size:0.68rem;color:#7890a7;margin-top:0.25rem;text-transform:uppercase;letter-spacing:.12em;">
+            Conveyor condition intelligence
         </div>
     </div>
     """,
     unsafe_allow_html=True
 )
 
-st.sidebar.markdown("### ⚙️ Detection Settings")
+st.sidebar.markdown("### Inspection controls")
 
 confidence = st.sidebar.slider(
-    "Confidence Threshold",
+    "Detection confidence",
     min_value=0.10,
     max_value=0.90,
     value=0.24,
     step=0.01
 )
 
-st.sidebar.caption("Recommended operating threshold: **0.24**")
+st.sidebar.caption("Operating reference: **0.24**")
 
 st.sidebar.markdown("---")
-
-st.sidebar.markdown(
-    """
-    <div style="margin-top:1rem;padding:1rem;border:1px solid #334155;
-    border-radius:12px;background:#172033;">
-        <div style="font-weight:700;margin-bottom:0.65rem;">System Stack</div>
-        <div style="font-size:0.82rem;line-height:1.75;color:#cbd5e1;">
-            <b>Detection</b> · YOLOv8<br>
-            <b>Classes</b> · Scratch, Edge Damage<br>
-            <b>Anomaly</b> · ROI Autoencoder<br>
-            <b>Severity</b> · Visual Proxy<br>
-            <b>Health</b> · Visual Condition Score<br>
-            <b>Prediction</b> · XGBoost + SHAP
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
 
 
 # ============================================================
 # FILE UPLOAD
 # ============================================================
 
+st.markdown(
+    '<div class="section-title">Inspection image</div>',
+    unsafe_allow_html=True
+)
+
 uploaded_file = st.file_uploader(
-    "Upload conveyor-belt image",
+    "Inspection image",
     type=["jpg", "jpeg", "png"],
-    help="Supported formats: JPG, JPEG and PNG."
+    help="Supported formats: JPG, JPEG and PNG.",
+    label_visibility="collapsed"
 )
 
 
@@ -452,12 +320,12 @@ uploaded_file = st.file_uploader(
 
 def health_status_emoji(status):
     mapping = {
-        "HEALTHY": "🟢",
-        "WARNING": "🟡",
-        "DEGRADED": "🟠",
-        "CRITICAL": "🔴"
+        "HEALTHY": "",
+        "WARNING": "",
+        "DEGRADED": "",
+        "CRITICAL": ""
     }
-    return mapping.get(status, "⚪")
+    return mapping.get(status, "")
 
 
 def health_status_message(status):
@@ -602,9 +470,9 @@ def plot_local_shap(explanation):
 
     ax.axvline(0, linewidth=1)
 
-    ax.set_xlabel("SHAP contribution")
+    ax.set_xlabel("Contribution to estimated risk")
     ax.set_title(
-        "Local SHAP Explanation for Failure Risk"
+        "Operating risk drivers"
     )
 
     fig.tight_layout()
@@ -632,7 +500,7 @@ if uploaded_file is not None:
 
     image = Image.open(uploaded_file)
 
-    st.markdown('<div class="section-title">📷 Input Image</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Input Image</div>', unsafe_allow_html=True)
 
     preview_col1, preview_col2 = st.columns([1.55, 1])
 
@@ -671,7 +539,7 @@ if uploaded_file is not None:
         st.session_state.pop("belt_output_image_path", None)
 
     analyze_clicked = st.button(
-        "🔍  Run Belt Inspection",
+        "Run Belt Inspection",
         type="primary",
         use_container_width=True
     )
@@ -777,6 +645,7 @@ if uploaded_file is not None:
                 result = json.load(f)
             st.session_state["belt_result"] = result
             st.session_state["belt_output_image_path"] = output_image_path
+            st.session_state["last_inspection_time"] = datetime.now()
 
     # Render the complete analysis result from session state.
     # This survives Streamlit reruns caused by the failure-risk button.
@@ -789,7 +658,10 @@ if uploaded_file is not None:
         # RESULTS
         # =================================================
 
-        st.success("Inspection completed successfully.")
+        st.markdown(
+            '<div class="result-banner"><div><div class="eyebrow">Inspection complete</div><div class="value">Condition assessment is ready</div></div><span class="priority-chip">RESULTS READY</span></div>',
+            unsafe_allow_html=True
+        )
 
         # -------------------------------------------------
         # Extract health/anomaly information
@@ -874,11 +746,11 @@ if uploaded_file is not None:
         # =================================================
 
         st.markdown(
-            '<div class="section-title">🩺 Belt Health Overview</div>',
+            '<div class="section-title">Condition overview</div>',
             unsafe_allow_html=True
         )
         st.markdown(
-            '<div class="section-subtitle">Visual condition assessment generated from detected defects, severity and ROI anomaly evidence.</div>',
+            '<div class="section-subtitle">Current condition based on the latest inspection image.</div>',
             unsafe_allow_html=True
         )
 
@@ -889,7 +761,7 @@ if uploaded_file is not None:
         with health_col1:
 
             st.metric(
-                "Health Score",
+                "Condition Score",
                 f"{health_score:.0f} / 100"
             )
 
@@ -908,7 +780,7 @@ if uploaded_file is not None:
                 {health_status_message(health_status)}
 
                 **Maintenance Recommendation:**  
-                ### 🛠️ {overall_priority}
+                ### {overall_priority}
                 """
             )
 
@@ -928,26 +800,26 @@ if uploaded_file is not None:
         # =================================================
 
         st.markdown(
-            "### 📐 Health Score Components"
+            "### Condition indicators"
         )
 
         h1, h2, h3 = st.columns(3)
 
         with h1:
             st.metric(
-                "Defect Condition",
+                "Defect condition",
                 f"{health.get('defect_condition', 100):.0f}/100"
             )
 
         with h2:
             st.metric(
-                "Severity Condition",
+                "Severity condition",
                 f"{health.get('severity_condition', 100):.0f}/100"
             )
 
         with h3:
             st.metric(
-                "Anomaly Condition",
+                "Visual anomaly",
                 f"{health.get('anomaly_condition', 100):.0f}/100"
             )
 
@@ -963,18 +835,18 @@ if uploaded_file is not None:
         # ANOMALY MONITORING
         # =================================================
 
-        st.markdown('<div class="section-title">🧠 ROI Anomaly Detection</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Visual condition signals</div>', unsafe_allow_html=True)
 
         a1, a2, a3 = st.columns(3)
 
         with a1:
             if anomaly_status == "ANOMALOUS":
                 st.error(
-                    "⚠️ ANOMALOUS"
+                    "ANOMALOUS"
                 )
             elif anomaly_status == "NORMAL":
                 st.success(
-                    "✅ NORMAL"
+                    "NORMAL"
                 )
             else:
                 st.warning(
@@ -984,12 +856,12 @@ if uploaded_file is not None:
         with a2:
             if anomaly_score is not None:
                 st.metric(
-                    "Reconstruction Error",
+                    "Visual deviation",
                     f"{float(anomaly_score):.6f}"
                 )
             else:
                 st.metric(
-                    "Reconstruction Error",
+                    "Visual deviation",
                     "N/A"
                 )
 
@@ -1000,13 +872,13 @@ if uploaded_file is not None:
             )
 
             st.metric(
-                "Anomaly Threshold",
+                "Reference level",
                 f"{float(threshold):.6f}"
             )
 
         st.caption(
             "Higher reconstruction error indicates that "
-            "the belt ROI is visually more unusual than "
+            "the belt image is visually more unusual than "
             "patterns learned by the autoencoder."
         )
 
@@ -1014,9 +886,9 @@ if uploaded_file is not None:
         # PREDICTIVE MAINTENANCE / FAILURE RISK
         # =================================================
 
-        st.markdown('<div class="section-title">🔮 Predictive Maintenance Analytics</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Operating condition</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-subtitle">Complementary sensor-based failure-risk benchmark with local model explainability.</div>',
+            '<div class="section-subtitle">Enter current operating readings when equipment telemetry is available.</div>',
             unsafe_allow_html=True
         )
 
@@ -1039,7 +911,7 @@ if uploaded_file is not None:
 
         else:
 
-            st.markdown("**Sensor / Operating Inputs**")
+            st.markdown("**Operating readings**")
 
             pm1, pm2, pm3 = st.columns(3)
 
@@ -1095,14 +967,14 @@ if uploaded_file is not None:
                 )
 
             if st.button(
-                "📈  Calculate Failure Risk",
+                "Assess operating risk",
                 key="failure_risk_button",
                 type="primary",
                 use_container_width=True
             ):
 
                 with st.spinner(
-                    "Calculating failure risk and SHAP explanation..."
+                    "Assessing operating condition..."
                 ):
 
                     failure_probability, shap_explanation = (
@@ -1122,7 +994,7 @@ if uploaded_file is not None:
 
                 with r1:
                     st.metric(
-                        "Predicted Failure Risk",
+                        "Failure risk",
                         f"{risk_percent:.2f}%"
                     )
 
@@ -1136,7 +1008,7 @@ if uploaded_file is not None:
                         risk_label = "LOW"
 
                     st.metric(
-                        "Model Risk Band",
+                        "Risk level",
                         risk_label
                     )
 
@@ -1147,13 +1019,11 @@ if uploaded_file is not None:
                 }
 
                 st.caption(
-                    "Risk-band thresholds are presentation "
-                    "thresholds only; they are not calibrated "
-                    "maintenance decision limits."
+                    "Risk levels are screening indicators, not calibrated maintenance limits."
                 )
 
                 st.markdown(
-                    "#### 🧩 Why did the model make this prediction?"
+                    "#### Risk drivers"
                 )
 
                 positive = shap_explanation[
@@ -1169,7 +1039,7 @@ if uploaded_file is not None:
                     top_positive = positive.iloc[0]
 
                     st.write(
-                        f"🔴 **{top_positive['Feature']}** "
+                        f"**{top_positive['Feature']}** "
                         f"contributed toward higher predicted "
                         f"failure risk."
                     )
@@ -1179,7 +1049,7 @@ if uploaded_file is not None:
                     top_negative = negative.iloc[0]
 
                     st.write(
-                        f"🟢 **{top_negative['Feature']}** "
+                        f"**{top_negative['Feature']}** "
                         f"contributed toward lower predicted "
                         f"failure risk."
                     )
@@ -1190,19 +1060,19 @@ if uploaded_file is not None:
                 )
 
                 st.markdown(
-                    "#### 📊 Feature Contributions"
+                    "#### Risk drivers"
                 )
 
                 display_explanation = shap_explanation[
                     ["Feature", "SHAP Value"]
                 ].copy()
 
-                display_explanation["Direction"] = (
+                display_explanation["Effect"] = (
                     display_explanation["SHAP Value"].apply(
                         lambda value:
-                        "Increases risk"
+                        "Higher risk"
                         if value > 0
-                        else "Decreases risk"
+                        else "Lower risk"
                         if value < 0
                         else "Neutral"
                     )
@@ -1219,7 +1089,7 @@ if uploaded_file is not None:
                 )
 
                 with st.expander(
-                    "ℹ️ Predictive Maintenance Model Details"
+                    "Technical details"
                 ):
 
                     st.write(
@@ -1260,7 +1130,7 @@ if uploaded_file is not None:
         # =================================================
 
         st.markdown("---")
-        st.markdown('<div class="section-title">🛠️ Maintenance Decision Support</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Maintenance action</div>', unsafe_allow_html=True)
 
         st.caption(
             "Decision-support summary combining visual inspection findings "
@@ -1270,7 +1140,7 @@ if uploaded_file is not None:
         decision_col1, decision_col2 = st.columns(2)
 
         with decision_col1:
-            st.markdown("### 📷 Visual Inspection")
+            st.markdown("### Inspection condition")
 
             st.metric(
                 "Visual Condition",
@@ -1304,18 +1174,18 @@ if uploaded_file is not None:
             )
 
         with decision_col2:
-            st.markdown("### 🔮 Sensor-Based Prediction")
+            st.markdown("### Operating condition")
 
             failure_state = st.session_state.get("failure_risk_result")
 
             if failure_state is not None:
                 st.metric(
-                    "Sensor Failure Risk",
+                    "Failure risk",
                     f"{failure_state['risk_percent']:.2f}%"
                 )
 
                 st.metric(
-                    "Model Risk Band",
+                    "Risk level",
                     failure_state["risk_label"]
                 )
             else:
@@ -1324,14 +1194,14 @@ if uploaded_file is not None:
                     "to include it in this summary."
                 )
 
-        st.markdown("### 🛠️ Recommended Action")
+        st.markdown("### Recommended Action")
 
         if (
             health_status == "CRITICAL"
             or high_severity_count >= 3
             or anomaly_status == "ANOMALOUS"
         ):
-            st.error("🔴 IMMEDIATE VISUAL INSPECTION")
+            st.error("IMMEDIATE VISUAL INSPECTION")
 
             st.write(
                 "The visual inspection indicates significant belt condition "
@@ -1340,7 +1210,7 @@ if uploaded_file is not None:
             )
 
         elif health_status == "DEGRADED":
-            st.warning("🟠 SCHEDULE INSPECTION")
+            st.warning("SCHEDULE INSPECTION")
 
             st.write(
                 "The visual inspection indicates degraded belt condition. "
@@ -1348,7 +1218,7 @@ if uploaded_file is not None:
             )
 
         else:
-            st.success("🟢 MONITOR")
+            st.success("MONITOR")
 
             st.write(
                 "No immediate visual maintenance action is indicated. "
@@ -1364,7 +1234,7 @@ if uploaded_file is not None:
         # INSPECTION SUMMARY
         # =================================================
 
-        st.markdown('<div class="section-title">📊 Inspection Summary</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Inspection snapshot</div>', unsafe_allow_html=True)
 
         col1, col2, col3, col4 = st.columns(4)
 
@@ -1396,7 +1266,7 @@ if uploaded_file is not None:
         # OUTPUT IMAGE
         # =================================================
 
-        st.markdown('<div class="section-title">🔎 Detection Result</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Inspection result</div>', unsafe_allow_html=True)
 
         if os.path.exists(
             output_image_path
@@ -1415,25 +1285,25 @@ if uploaded_file is not None:
         # SEVERITY SUMMARY
         # =================================================
 
-        st.markdown('<div class="section-title">⚠️ Severity Distribution</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Severity profile</div>', unsafe_allow_html=True)
 
         s1, s2, s3 = st.columns(3)
 
         with s1:
             st.metric(
-                "🔴 High",
+                "High",
                 high_count
             )
 
         with s2:
             st.metric(
-                "🟠 Medium",
+                "Medium",
                 medium_count
             )
 
         with s3:
             st.metric(
-                "🟢 Low",
+                "Low",
                 low_count
             )
 
@@ -1441,7 +1311,7 @@ if uploaded_file is not None:
         # DETECTION TABLE
         # =================================================
 
-        st.markdown('<div class="section-title">📋 Detailed Detection Results</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Findings</div>', unsafe_allow_html=True)
 
         if detections:
 
@@ -1526,12 +1396,12 @@ if uploaded_file is not None:
         # =================================================
 
         with st.expander(
-            "ℹ️ Model & Methodology"
+            "Model & Methodology"
         ):
 
             st.write(
                 """
-                **Detection Model:** YOLOv8
+                **Inspection engine:** Object detection
 
                 **Detected Classes:**
                 - Scratch
@@ -1543,9 +1413,9 @@ if uploaded_file is not None:
                 **Severity:** Visual severity proxy based
                 on detected bounding-box characteristics.
 
-                **Health Score:** Normalized weighted
+                **Condition Score:** Normalized weighted
                 visual condition score based on defect
-                burden, visual severity, and ROI anomaly
+                burden, visual severity, and visual anomaly
                 reconstruction error.
 
                 **Weights:** 25% defect condition,
@@ -1572,102 +1442,6 @@ if uploaded_file is not None:
 
 
         # ============================================================
-        # HOW BELTGUARD WORKS
-        # ============================================================
-
-        st.markdown("---")
-        st.markdown(
-            '<div class="section-title">🧭 How BeltGuard Works</div>',
-            unsafe_allow_html=True
-        )
-        st.markdown(
-            '<div class="section-subtitle">A layered AI workflow for conveyor-belt inspection and maintenance decision support.</div>',
-            unsafe_allow_html=True
-        )
-
-        with st.expander("View the BeltGuard inspection workflow", expanded=False):
-            wf1, wf2, wf3 = st.columns(3)
-
-            with wf1:
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>1. Visual Inspection</b><br>
-                        <span style="color:#64748b;">
-                        Upload a conveyor image and detect visible belt defects using the trained YOLOv8 model.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>2. Defect Classification</b><br>
-                        <span style="color:#64748b;">
-                        Identify detected regions as scratch or edge damage and estimate a visual severity level.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-
-            with wf2:
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>3. Visual Anomaly Analysis</b><br>
-                        <span style="color:#64748b;">
-                        The ROI convolutional autoencoder compares belt appearance against learned visual patterns using reconstruction error.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>4. Condition Scoring</b><br>
-                        <span style="color:#64748b;">
-                        Defect burden, visual severity and anomaly evidence are combined into a normalized visual condition score.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-
-            with wf3:
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>5. Maintenance Decision Support</b><br>
-                        <span style="color:#64748b;">
-                        Inspection findings are translated into monitor, schedule-inspection or immediate-inspection guidance.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    '''
-                    <div class="info-card">
-                        <b>6. Sensor-Risk Benchmark</b><br>
-                        <span style="color:#64748b;">
-                        Optional operating values are evaluated by a separate XGBoost model and explained with SHAP.
-                        </span>
-                    </div>
-                    ''',
-                    unsafe_allow_html=True
-                )
-
-            st.info(
-                "Deployment note: the current application performs image-based inspection on uploaded images. "
-                "The XGBoost failure-risk component is a separate sensor-based benchmark and does not derive sensor values from the image. "
-                "This application should therefore be described as AI-assisted inspection and maintenance decision support, "
-                "not as a live equipment sensor system or RUL predictor."
-            )
-
-        # ============================================================
 # FOOTER
 # ============================================================
 
@@ -1675,11 +1449,8 @@ st.markdown("---")
 
 st.markdown(
     """
-    <div class="belt-footer">
-        <b>BeltGuard</b> · AI-Based Conveyor Belt Inspection &nbsp;|&nbsp;
-        YOLOv8 · ROI Autoencoder · XGBoost · SHAP
-        <br>
-        <span style="font-size:0.75rem;">AI-assisted inspection and maintenance decision support</span>
+    <div class="footer-line">
+        BELTGUARD &nbsp;·&nbsp; Conveyor condition intelligence &nbsp;·&nbsp; Inspection console
     </div>
     """,
     unsafe_allow_html=True
