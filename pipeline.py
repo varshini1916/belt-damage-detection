@@ -1,9 +1,9 @@
 """
-BeltGuard — Conveyor Belt Damage Detection Pipeline
+BeltGuard — Memory Optimized Conveyor Belt Damage Detection Pipeline
 
 Features:
 1. Belt ROI masking
-2. YOLOv8 defect detection
+2. YOLO defect detection
 3. Confidence filtering
 4. Optional TTA
 5. Visual severity estimation
@@ -13,11 +13,13 @@ Features:
 9. Health score
 10. Optional Grad-CAM explainability
 
-IMPORTANT:
-- Grad-CAM is DISABLED by default to reduce memory usage.
-- Enable it only when sufficient RAM is available.
-- Severity is a visual severity PROXY based on relative
-  detected bounding-box area.
+IMPORTANT FOR RENDER:
+- Designed for low-memory CPU deployment.
+- Grad-CAM is disabled by default.
+- YOLO inference uses a smaller input size.
+- Large images are resized before inference.
+- Only one image is processed at a time.
+- Explicit memory cleanup is performed after every image.
 """
 
 # ============================================================
@@ -26,23 +28,24 @@ IMPORTANT:
 
 import os
 
-# Reduce CPU thread memory usage.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import gc
 import json
 import argparse
 
-import numpy as np
 import cv2
+import numpy as np
 import torch
 
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from ultralytics import YOLO
+
 from belt_roi_autoencoder import (
     BeltAutoencoder,
     extract_belt_roi
@@ -63,10 +66,36 @@ CLASS_COLORS = {
     1: (0, 0, 255)
 }
 
-# Based on validation.
+
+# Confidence threshold
 DEFAULT_CONFIDENCE = 0.24
 
-# ROI Autoencoder
+
+# ============================================================
+# MEMORY OPTIMIZATION
+# ============================================================
+
+# Maximum dimension used for YOLO inference.
+#
+# This is intentionally smaller than your previous 640 setting.
+# 416 significantly reduces inference memory.
+DETECTION_SIZE = 416
+
+
+# Maximum image dimension kept during processing.
+#
+# Very large 3840x2160 images consume a lot of RAM.
+MAX_IMAGE_DIMENSION = 1280
+
+
+# Render free instance = CPU
+DEVICE = "cpu"
+
+
+# ============================================================
+# ROI AUTOENCODER
+# ============================================================
+
 ANOMALY_MODEL_PATH = (
     Path(__file__).resolve().parent
     / "models"
@@ -77,21 +106,22 @@ ANOMALY_THRESHOLD = 0.001486
 
 
 # ============================================================
-# GRADCAM CONFIGURATION
+# GRAD-CAM
 # ============================================================
 
-# IMPORTANT:
-# False = Render-safe mode
-# True  = Generate Grad-CAM when pipeline runs
-#
-# Keep this FALSE on the Render 512 MB instance.
+# NEVER enable this on Render 512 MB.
 ENABLE_GRADCAM = False
 
-# Environment variable can override the setting.
+
+# Environment override.
 #
-# Example:
+# Keep this FALSE on Render.
+#
 # BELTGUARD_GRADCAM=true
 #
+# should only be used locally on a machine
+# with sufficient RAM.
+
 if os.getenv(
     "BELTGUARD_GRADCAM",
     "false"
@@ -101,11 +131,86 @@ if os.getenv(
 
 
 # ============================================================
-# DEVICE
+# GENERAL MEMORY CLEANUP
 # ============================================================
 
-# Render free instance should use CPU.
-DEVICE = "cpu"
+def cleanup_memory():
+
+    gc.collect()
+
+    if torch.cuda.is_available():
+
+        torch.cuda.empty_cache()
+
+
+# ============================================================
+# IMAGE RESIZING
+# ============================================================
+
+def resize_for_detection(
+    image,
+    max_dimension=MAX_IMAGE_DIMENSION
+):
+    """
+    Resize large images before YOLO inference.
+
+    Returns:
+        resized_image
+        scale_x
+        scale_y
+    """
+
+    original_h, original_w = image.shape[:2]
+
+    largest_dimension = max(
+        original_w,
+        original_h
+    )
+
+    if largest_dimension <= max_dimension:
+
+        return (
+            image,
+            1.0,
+            1.0
+        )
+
+    scale = (
+        max_dimension
+        / float(largest_dimension)
+    )
+
+    new_w = max(
+        1,
+        int(original_w * scale)
+    )
+
+    new_h = max(
+        1,
+        int(original_h * scale)
+    )
+
+    resized = cv2.resize(
+        image,
+        (new_w, new_h),
+        interpolation=cv2.INTER_AREA
+    )
+
+    scale_x = (
+        original_w
+        / float(new_w)
+    )
+
+    scale_y = (
+        original_h
+        / float(new_h)
+    )
+
+    return (
+        resized,
+        scale_x,
+        scale_y
+    )
 
 
 # ============================================================
@@ -117,58 +222,91 @@ def load_belt_roi(
     img_w,
     img_h
 ):
-    """Load belt ROI polygon from YOLO label file."""
 
     if not os.path.exists(label_path):
+
         return None
 
-    with open(
-        label_path,
-        "r"
-    ) as f:
+    try:
 
-        line = f.readline().strip()
+        with open(
+            label_path,
+            "r"
+        ) as f:
 
-    if not line:
-        return None
+            line = f.readline().strip()
 
-    parts = line.split()
+        if not line:
 
-    if len(parts) < 7:
-        return None
+            return None
 
-    coords = [
-        float(x)
-        for x in parts[1:]
-    ]
+        parts = line.split()
 
-    pts = np.array(
-        [
-            (
-                int(coords[i] * img_w),
-                int(coords[i + 1] * img_h)
+        if len(parts) < 7:
+
+            return None
+
+        coords = [
+            float(x)
+            for x in parts[1:]
+        ]
+
+        pts = []
+
+        for i in range(
+            0,
+            len(coords),
+            2
+        ):
+
+            if i + 1 >= len(coords):
+
+                break
+
+            pts.append(
+                (
+                    int(
+                        coords[i]
+                        * img_w
+                    ),
+                    int(
+                        coords[i + 1]
+                        * img_h
+                    )
+                )
             )
-            for i in range(
-                0,
-                len(coords),
-                2
-            )
-        ],
-        dtype=np.int32
-    )
 
-    return pts
+        if len(pts) < 3:
 
+            return None
+
+        return np.array(
+            pts,
+            dtype=np.int32
+        )
+
+    except Exception as e:
+
+        print(
+            f"WARNING: ROI loading failed: {e}"
+        )
+
+        return None
+
+
+# ============================================================
 
 def create_belt_mask(
     img_w,
     img_h,
     polygon_pts
 ):
-    """Create binary mask of the belt region."""
 
     mask = np.zeros(
-        (img_h, img_w),
+        (
+            img_h,
+            img_w
+        ),
         dtype=np.uint8
     )
 
@@ -181,26 +319,36 @@ def create_belt_mask(
     return mask
 
 
+# ============================================================
+
 def mask_image(
     img,
     belt_mask
 ):
-    """Apply belt mask to image."""
 
     masked = img.copy()
 
     masked[
         belt_mask == 0
-    ] = [128, 128, 128]
+    ] = (
+        128,
+        128,
+        128
+    )
 
     return masked
 
+
+# ============================================================
 
 def filter_detections_in_belt(
     detections,
     belt_mask
 ):
-    """Keep detections whose center is inside the belt ROI."""
+
+    if belt_mask is None:
+
+        return detections
 
     h, w = belt_mask.shape
 
@@ -211,24 +359,39 @@ def filter_detections_in_belt(
         bbox = det["bbox"]
 
         cx = int(
-            (bbox[0] + bbox[2]) / 2
+            (
+                bbox[0]
+                + bbox[2]
+            ) / 2
         )
 
         cy = int(
-            (bbox[1] + bbox[3]) / 2
+            (
+                bbox[1]
+                + bbox[3]
+            ) / 2
         )
 
         cx = max(
             0,
-            min(w - 1, cx)
+            min(
+                w - 1,
+                cx
+            )
         )
 
         cy = max(
             0,
-            min(h - 1, cy)
+            min(
+                h - 1,
+                cy
+            )
         )
 
-        if belt_mask[cy, cx] > 0:
+        if belt_mask[
+            cy,
+            cx
+        ] > 0:
 
             filtered.append(det)
 
@@ -251,13 +414,18 @@ def load_anomaly_model():
             ANOMALY_MODEL_PATH
         )
 
-        return None, torch.device("cpu")
+        return (
+            None,
+            torch.device("cpu")
+        )
 
     device = torch.device("cpu")
 
     try:
 
-        model = BeltAutoencoder().to(device)
+        model = BeltAutoencoder().to(
+            device
+        )
 
         state_dict = torch.load(
             ANOMALY_MODEL_PATH,
@@ -274,11 +442,13 @@ def load_anomaly_model():
         model.eval()
 
         print(
-            f"ROI Autoencoder loaded: "
-            f"{ANOMALY_MODEL_PATH}"
+            "ROI Autoencoder loaded."
         )
 
-        return model, device
+        return (
+            model,
+            device
+        )
 
     except Exception as e:
 
@@ -288,10 +458,15 @@ def load_anomaly_model():
 
         print(e)
 
-        gc.collect()
+        cleanup_memory()
 
-        return None, device
+        return (
+            None,
+            device
+        )
 
+
+# ============================================================
 
 def calculate_roi_anomaly_score(
     model,
@@ -302,7 +477,14 @@ def calculate_roi_anomaly_score(
 
     if model is None:
 
-        return None, "UNAVAILABLE"
+        return (
+            None,
+            "UNAVAILABLE"
+        )
+
+    tensor = None
+    reconstructed = None
+    roi = None
 
     try:
 
@@ -311,9 +493,19 @@ def calculate_roi_anomaly_score(
             label_path
         )
 
-        if roi is None or roi.size == 0:
+        if roi is None:
 
-            return None, "ROI_UNAVAILABLE"
+            return (
+                None,
+                "ROI_UNAVAILABLE"
+            )
+
+        if roi.size == 0:
+
+            return (
+                None,
+                "ROI_UNAVAILABLE"
+            )
 
         roi = cv2.cvtColor(
             roi,
@@ -329,7 +521,8 @@ def calculate_roi_anomaly_score(
         roi = (
             roi.astype(
                 np.float32
-            ) / 255.0
+            )
+            / 255.0
         )
 
         roi = np.transpose(
@@ -341,7 +534,9 @@ def calculate_roi_anomaly_score(
             roi
         ).unsqueeze(0)
 
-        tensor = tensor.to(device)
+        tensor = tensor.to(
+            device
+        )
 
         with torch.no_grad():
 
@@ -356,33 +551,48 @@ def calculate_roi_anomaly_score(
                 ) ** 2
             ).item()
 
-        status = (
-            "ANOMALOUS"
-            if error >= ANOMALY_THRESHOLD
-            else "NORMAL"
-        )
+        if error >= ANOMALY_THRESHOLD:
 
-        del roi
-        del tensor
-        del reconstructed
+            status = "ANOMALOUS"
 
-        gc.collect()
+        else:
+
+            status = "NORMAL"
 
         return (
-            round(error, 8),
+            round(
+                error,
+                8
+            ),
             status
         )
 
     except Exception as e:
 
         print(
-            "WARNING: Anomaly scoring failed "
-            f"for {os.path.basename(image_path)}: {e}"
+            "WARNING: Anomaly scoring failed:"
         )
 
-        gc.collect()
+        print(e)
 
-        return None, "ERROR"
+        return (
+            None,
+            "ERROR"
+        )
+
+    finally:
+
+        del roi
+
+        if tensor is not None:
+
+            del tensor
+
+        if reconstructed is not None:
+
+            del reconstructed
+
+        cleanup_memory()
 
 
 # ============================================================
@@ -394,10 +604,6 @@ def calculate_severity(
     img_w,
     img_h
 ):
-    """
-    Estimate visual severity using relative
-    bounding-box area.
-    """
 
     x1, y1, x2, y2 = bbox
 
@@ -421,7 +627,7 @@ def calculate_severity(
         * img_h
     )
 
-    if image_area == 0:
+    if image_area <= 0:
 
         return {
             "severity_score": 0.0,
@@ -452,15 +658,21 @@ def calculate_severity(
         severity = "High"
 
     return {
-        "severity_score": round(
-            score,
-            2
-        ),
-        "area_ratio": round(
-            area_ratio,
-            6
-        ),
-        "severity": severity
+
+        "severity_score":
+            round(
+                score,
+                2
+            ),
+
+        "area_ratio":
+            round(
+                area_ratio,
+                6
+            ),
+
+        "severity":
+            severity
     }
 
 
@@ -473,13 +685,6 @@ def calculate_health_score(
     anomaly_score,
     anomaly_threshold
 ):
-    """
-    Calculate Visual Condition Score from 0-100.
-    """
-
-    # --------------------------------------------------------
-    # DEFECT CONDITION
-    # --------------------------------------------------------
 
     defect_count = len(
         detections
@@ -494,17 +699,17 @@ def calculate_health_score(
         )
     )
 
-    # --------------------------------------------------------
-    # SEVERITY CONDITION
-    # --------------------------------------------------------
-
     severity_values = {
+
         "High": 1.0,
+
         "Medium": 0.5,
+
         "Low": 0.15
     }
 
     severity_burden = sum(
+
         severity_values.get(
             det.get(
                 "severity",
@@ -512,6 +717,7 @@ def calculate_health_score(
             ),
             0.0
         )
+
         for det in detections
     )
 
@@ -523,10 +729,6 @@ def calculate_health_score(
             + severity_burden / 3.0
         )
     )
-
-    # --------------------------------------------------------
-    # ANOMALY CONDITION
-    # --------------------------------------------------------
 
     if (
         anomaly_score is None
@@ -551,14 +753,20 @@ def calculate_health_score(
             )
         )
 
-    # --------------------------------------------------------
-    # WEIGHTED SCORE
-    # --------------------------------------------------------
-
     health_score = (
-        0.25 * defect_condition
-        + 0.45 * severity_condition
-        + 0.30 * anomaly_condition
+
+        0.25
+        * defect_condition
+
+        +
+
+        0.45
+        * severity_condition
+
+        +
+
+        0.30
+        * anomaly_condition
     )
 
     health_score = max(
@@ -568,10 +776,6 @@ def calculate_health_score(
             health_score
         )
     )
-
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
 
     if health_score >= 80:
 
@@ -590,30 +794,45 @@ def calculate_health_score(
         status = "CRITICAL"
 
     return {
-        "score": round(
-            health_score,
-            2
-        ),
-        "status": status,
-        "defect_condition": round(
-            defect_condition,
-            2
-        ),
-        "severity_condition": round(
-            severity_condition,
-            2
-        ),
-        "anomaly_condition": round(
-            anomaly_condition,
-            2
-        ),
-        "defect_weight": 0.25,
-        "severity_weight": 0.45,
-        "anomaly_weight": 0.30,
-        "method": (
-            "Normalized weighted visual "
-            "condition score"
-        )
+
+        "score":
+            round(
+                health_score,
+                2
+            ),
+
+        "status":
+            status,
+
+        "defect_condition":
+            round(
+                defect_condition,
+                2
+            ),
+
+        "severity_condition":
+            round(
+                severity_condition,
+                2
+            ),
+
+        "anomaly_condition":
+            round(
+                anomaly_condition,
+                2
+            ),
+
+        "defect_weight":
+            0.25,
+
+        "severity_weight":
+            0.45,
+
+        "anomaly_weight":
+            0.30,
+
+        "method":
+            "Normalized weighted visual condition score"
     }
 
 
@@ -654,23 +873,24 @@ def nms_detections(
 
         return []
 
-    dets = sorted(
+    detections = sorted(
         detections,
-        key=lambda d: d["confidence"],
+        key=lambda x:
+            x["confidence"],
         reverse=True
     )
 
     keep = []
 
-    for d in dets:
+    for det in detections:
 
-        box = d["bbox"]
+        box = det["bbox"]
 
         overlap = False
 
-        for k in keep:
+        for kept in keep:
 
-            kb = k["bbox"]
+            kb = kept["bbox"]
 
             ix1 = max(
                 box[0],
@@ -693,35 +913,44 @@ def nms_detections(
             )
 
             inter = (
+
                 max(
                     0,
                     ix2 - ix1
                 )
+
                 *
+
                 max(
                     0,
                     iy2 - iy1
                 )
             )
 
-            a1 = (
+            area1 = (
+
                 max(
                     0,
                     box[2] - box[0]
                 )
+
                 *
+
                 max(
                     0,
                     box[3] - box[1]
                 )
             )
 
-            a2 = (
+            area2 = (
+
                 max(
                     0,
                     kb[2] - kb[0]
                 )
+
                 *
+
                 max(
                     0,
                     kb[3] - kb[1]
@@ -729,8 +958,8 @@ def nms_detections(
             )
 
             union = (
-                a1
-                + a2
+                area1
+                + area2
                 - inter
             )
 
@@ -744,11 +973,14 @@ def nms_detections(
                 if iou > iou_thresh:
 
                     overlap = True
+
                     break
 
         if not overlap:
 
-            keep.append(d)
+            keep.append(
+                det
+            )
 
     return keep
 
@@ -770,9 +1002,9 @@ def draw_detections(
     if font_size is None:
 
         font_size = max(
-            24,
+            20,
             min(
-                42,
+                36,
                 int(
                     min(
                         img_pil.width,
@@ -783,35 +1015,45 @@ def draw_detections(
             )
         )
 
-    try:
+    font = None
 
-        font = ImageFont.truetype(
-            "C:/Windows/Fonts/arialbd.ttf",
-            font_size
-        )
+    # Linux / Render
+    font_paths = [
 
-    except (
-        IOError,
-        OSError
-    ):
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+
+        "C:/Windows/Fonts/arialbd.ttf"
+    ]
+
+    for font_path in font_paths:
 
         try:
 
             font = ImageFont.truetype(
-                "C:/Windows/Fonts/arial.ttf",
+                font_path,
                 font_size
             )
+
+            break
 
         except (
             IOError,
             OSError
         ):
 
-            font = ImageFont.load_default()
+            continue
+
+    if font is None:
+
+        font = ImageFont.load_default()
 
     for det in detections:
 
-        x1, y1, x2, y2 = det["bbox"]
+        x1, y1, x2, y2 = (
+            det["bbox"]
+        )
 
         cls = det.get(
             "class",
@@ -837,10 +1079,6 @@ def draw_detections(
             cls,
             (255, 255, 0)
         )
-
-        # ----------------------------------------------------
-        # BOUNDING BOX
-        # ----------------------------------------------------
 
         x1 = int(
             max(
@@ -883,13 +1121,13 @@ def draw_detections(
         )
 
         box_width = max(
-            3,
+            2,
             int(
                 min(
                     img_pil.width,
                     img_pil.height
                 )
-                * 0.0025
+                * 0.002
             )
         )
 
@@ -904,13 +1142,12 @@ def draw_detections(
             width=box_width
         )
 
-        # ----------------------------------------------------
-        # LABEL
-        # ----------------------------------------------------
-
         label = (
+
             f"{class_name.upper()} | "
+
             f"{conf:.0%} | "
+
             f"{severity.upper()}"
         )
 
@@ -930,8 +1167,8 @@ def draw_detections(
             - text_box[1]
         )
 
-        padding_x = 10
-        padding_y = 6
+        padding_x = 8
+        padding_y = 5
 
         label_width = (
             text_width
@@ -994,7 +1231,7 @@ def draw_detections(
                 label_x,
                 label_y,
                 label_x + label_width,
-                label_y + 4
+                label_y + 3
             ],
             fill=color
         )
@@ -1021,18 +1258,8 @@ def run_gradcam_if_enabled(
     image_path,
     output_path
 ):
-    """
-    Generate Grad-CAM only when explicitly enabled.
-
-    This function imports gradcam_utils lazily so that
-    Render does not load Grad-CAM during normal startup.
-    """
 
     if not ENABLE_GRADCAM:
-
-        print(
-            "Grad-CAM disabled for memory-safe deployment."
-        )
 
         return (
             "DISABLED",
@@ -1043,14 +1270,10 @@ def run_gradcam_if_enabled(
     try:
 
         # IMPORTANT:
-        # Lazy import.
+        # Import ONLY when Grad-CAM is actually used.
+
         from gradcam_utils import (
             generate_gradcam
-        )
-
-        print(
-            f"Generating Grad-CAM for: "
-            f"{image_path}"
         )
 
         generate_gradcam(
@@ -1095,7 +1318,297 @@ def run_gradcam_if_enabled(
 
     finally:
 
-        gc.collect()
+        cleanup_memory()
+
+
+# ============================================================
+# YOLO DETECTION
+# ============================================================
+
+def run_yolo_detection(
+    model,
+    image,
+    conf_threshold,
+    scale_x,
+    scale_y,
+    original_width,
+    original_height
+):
+
+    detections = []
+
+    results = None
+
+    try:
+
+        results = model.predict(
+
+            source=image,
+
+            conf=conf_threshold,
+
+            imgsz=DETECTION_SIZE,
+
+            device=DEVICE,
+
+            verbose=False,
+
+            stream=False,
+
+            batch=1,
+
+            max_det=20
+        )
+
+        if not results:
+
+            return []
+
+        result = results[0]
+
+        if (
+            result.boxes is None
+            or len(result.boxes) == 0
+        ):
+
+            return []
+
+        boxes = result.boxes
+
+        for index in range(
+            len(boxes)
+        ):
+
+            box = boxes[index]
+
+            xyxy = box.xyxy[
+                0
+            ].detach().cpu().numpy()
+
+            cls = int(
+                box.cls[
+                    0
+                ].detach().cpu().item()
+            )
+
+            confidence = float(
+                box.conf[
+                    0
+                ].detach().cpu().item()
+            )
+
+            # Map coordinates back
+            # to original image size.
+
+            x1 = int(
+                round(
+                    xyxy[0]
+                    * scale_x
+                )
+            )
+
+            y1 = int(
+                round(
+                    xyxy[1]
+                    * scale_y
+                )
+            )
+
+            x2 = int(
+                round(
+                    xyxy[2]
+                    * scale_x
+                )
+            )
+
+            y2 = int(
+                round(
+                    xyxy[3]
+                    * scale_y
+                )
+            )
+
+            x1 = max(
+                0,
+                min(
+                    original_width - 1,
+                    x1
+                )
+            )
+
+            y1 = max(
+                0,
+                min(
+                    original_height - 1,
+                    y1
+                )
+            )
+
+            x2 = max(
+                0,
+                min(
+                    original_width - 1,
+                    x2
+                )
+            )
+
+            y2 = max(
+                0,
+                min(
+                    original_height - 1,
+                    y2
+                )
+            )
+
+            bbox = [
+                x1,
+                y1,
+                x2,
+                y2
+            ]
+
+            severity_info = (
+                calculate_severity(
+                    bbox,
+                    original_width,
+                    original_height
+                )
+            )
+
+            maintenance = (
+                calculate_maintenance_priority(
+                    severity_info[
+                        "severity"
+                    ],
+                    confidence
+                )
+            )
+
+            detections.append({
+
+                "class":
+                    cls,
+
+                "class_name":
+                    CLASS_NAMES.get(
+                        cls,
+                        f"cls{cls}"
+                    ),
+
+                "confidence":
+                    round(
+                        confidence,
+                        4
+                    ),
+
+                "bbox":
+                    bbox,
+
+                "severity_score":
+                    severity_info[
+                        "severity_score"
+                    ],
+
+                "area_ratio":
+                    severity_info[
+                        "area_ratio"
+                    ],
+
+                "severity":
+                    severity_info[
+                        "severity"
+                    ],
+
+                "maintenance_priority":
+                    maintenance
+            })
+
+        return detections
+
+    finally:
+
+        if results is not None:
+
+            del results
+
+        cleanup_memory()
+
+
+# ============================================================
+# TTA
+# ============================================================
+
+def run_tta(
+    model,
+    image,
+    conf_threshold,
+    scale_x,
+    scale_y,
+    original_width,
+    original_height
+):
+
+    all_tta_detections = []
+
+    # --------------------------------------------------------
+    # Horizontal flip
+    # --------------------------------------------------------
+
+    flipped = cv2.flip(
+        image,
+        1
+    )
+
+    try:
+
+        detections = run_yolo_detection(
+            model,
+            flipped,
+            conf_threshold,
+            scale_x,
+            scale_y,
+            original_width,
+            original_height
+        )
+
+        for det in detections:
+
+            x1, y1, x2, y2 = (
+                det["bbox"]
+            )
+
+            det["bbox"] = [
+
+                original_width - x2,
+
+                y1,
+
+                original_width - x1,
+
+                y2
+            ]
+
+        all_tta_detections.extend(
+            detections
+        )
+
+    except Exception as e:
+
+        print(
+            f"WARNING: Horizontal TTA failed: {e}"
+        )
+
+    del flipped
+
+    cleanup_memory()
+
+    # --------------------------------------------------------
+    # Do NOT perform vertical flip on Render.
+    #
+    # It doubles inference memory again.
+    # --------------------------------------------------------
+
+    return all_tta_detections
 
 
 # ============================================================
@@ -1110,13 +1623,6 @@ def run_pipeline(
     use_roi=False,
     tta=False
 ):
-
-    """
-    Run complete BeltGuard inference pipeline.
-
-    Grad-CAM is disabled by default to keep memory usage
-    low enough for Render's 512 MB instance.
-    """
 
     os.makedirs(
         output_dir,
@@ -1136,11 +1642,26 @@ def run_pipeline(
     )
 
     print(
-        f"Grad-CAM enabled: {ENABLE_GRADCAM}"
+        f"Device: {DEVICE}"
     )
 
     print(
-        f"Device: {DEVICE}"
+        f"YOLO image size: {DETECTION_SIZE}"
+    )
+
+    print(
+        f"Maximum image dimension: "
+        f"{MAX_IMAGE_DIMENSION}"
+    )
+
+    print(
+        f"Grad-CAM enabled: "
+        f"{ENABLE_GRADCAM}"
+    )
+
+    print(
+        f"TTA enabled: "
+        f"{tta}"
     )
 
     # ========================================================
@@ -1218,10 +1739,11 @@ def run_pipeline(
         model_path
     )
 
-    # Force CPU.
     try:
 
-        model.to(DEVICE)
+        model.to(
+            DEVICE
+        )
 
     except Exception:
 
@@ -1232,28 +1754,32 @@ def run_pipeline(
     # ========================================================
 
     anomaly_model = None
+
     anomaly_device = torch.device(
         "cpu"
     )
 
-    # Only load anomaly model when ROI/anomaly processing
-    # is actually needed.
     if use_roi:
 
-        anomaly_model, anomaly_device = (
-            load_anomaly_model()
-        )
+        (
+            anomaly_model,
+            anomaly_device
+        ) = load_anomaly_model()
 
     # ========================================================
     # IMAGE LIST
     # ========================================================
 
     image_files = sorted(
+
         [
+
             f
+
             for f in os.listdir(
                 image_dir
             )
+
             if f.lower().endswith(
                 (
                     ".jpg",
@@ -1265,14 +1791,18 @@ def run_pipeline(
     )
 
     print(
-        f"Processing {len(image_files)} "
-        f"images from {image_dir}"
+        f"Processing "
+        f"{len(image_files)} images."
     )
 
-    labels_dir_default = os.path.join(
-        Path(__file__).resolve().parent,
-        "training_data",
-        "labels"
+    labels_dir_default = (
+        Path(__file__).resolve().parent
+        / "training_data"
+        / "labels"
+    )
+
+    labels_dir_default = str(
+        labels_dir_default
     )
 
     total_detections = 0
@@ -1285,10 +1815,23 @@ def run_pipeline(
     # IMAGE LOOP
     # ========================================================
 
-    for img_file in image_files:
+    for image_index, img_file in enumerate(
+        image_files,
+        start=1
+    ):
 
         print(
-            f"\nProcessing: {img_file}"
+            "\n------------------------------------------"
+        )
+
+        print(
+            f"Image {image_index}/"
+            f"{len(image_files)}: "
+            f"{img_file}"
+        )
+
+        print(
+            "------------------------------------------"
         )
 
         img_path = os.path.join(
@@ -1300,775 +1843,571 @@ def run_pipeline(
             img_file
         )[0]
 
-        # ----------------------------------------------------
-        # READ IMAGE
-        # ----------------------------------------------------
+        img_cv = None
+        resized_cv = None
+        belt_mask = None
+        masked_cv = None
+        img_pil = None
+        annotated_img = None
 
-        img_cv = cv2.imread(
-            img_path
-        )
+        try:
 
-        if img_cv is None:
+            # =================================================
+            # READ IMAGE
+            # =================================================
+
+            img_cv = cv2.imread(
+                img_path,
+                cv2.IMREAD_COLOR
+            )
+
+            if img_cv is None:
+
+                print(
+                    f"WARNING: Could not read "
+                    f"{img_file}"
+                )
+
+                continue
+
+            original_height, original_width = (
+                img_cv.shape[:2]
+            )
 
             print(
-                f"WARNING: Could not read "
-                f"{img_file}"
+                f"Original size: "
+                f"{original_width}x"
+                f"{original_height}"
             )
 
-            continue
-
-        img_h, img_w = (
-            img_cv.shape[:2]
-        )
-
-        # ----------------------------------------------------
-        # GRAD-CAM
-        # ----------------------------------------------------
-
-        gradcam_output_path = os.path.join(
-            output_dir,
-            base_name
-            + "_gradcam.jpg"
-        )
-
-        (
-            gradcam_status,
-            gradcam_file,
-            gradcam_error
-        ) = run_gradcam_if_enabled(
-            model=model,
-            image_path=img_path,
-            output_path=gradcam_output_path
-        )
-
-        # ----------------------------------------------------
-        # ROI LABEL
-        # ----------------------------------------------------
-
-        anomaly_label_path = os.path.join(
-            labels_dir_default,
-            base_name + ".txt"
-        )
-
-        # ----------------------------------------------------
-        # ROI ANOMALY
-        # ----------------------------------------------------
-
-        roi_anomaly_score = None
-
-        anomaly_status = "UNAVAILABLE"
-
-        if (
-            use_roi
-            and os.path.exists(
-                anomaly_label_path
-            )
-        ):
+            # =================================================
+            # RESIZE FOR DETECTION
+            # =================================================
 
             (
-                roi_anomaly_score,
-                anomaly_status
-            ) = calculate_roi_anomaly_score(
-                anomaly_model,
-                anomaly_device,
-                img_path,
-                anomaly_label_path
+                resized_cv,
+                scale_x,
+                scale_y
+            ) = resize_for_detection(
+                img_cv
             )
 
-        # ----------------------------------------------------
-        # BELT ROI MASK
-        # ----------------------------------------------------
+            resized_h, resized_w = (
+                resized_cv.shape[:2]
+            )
 
-        belt_mask = None
+            print(
+                f"Detection size: "
+                f"{resized_w}x"
+                f"{resized_h}"
+            )
 
-        if use_roi:
+            # =================================================
+            # ROI
+            # =================================================
 
-            label_file = (
+            anomaly_label_path = os.path.join(
+
+                labels_dir_default,
+
                 base_name
                 + ".txt"
             )
 
-            search_dirs = [
+            roi_anomaly_score = None
 
-                os.path.join(
-                    image_dir,
-                    "..",
-                    "labels"
-                ),
+            anomaly_status = (
+                "UNAVAILABLE"
+            )
 
-                labels_dir_default,
-
-                os.path.dirname(
-                    img_path
+            if (
+                use_roi
+                and os.path.exists(
+                    anomaly_label_path
                 )
-            ]
+            ):
 
-            for search_dir in search_dirs:
+                (
+                    roi_anomaly_score,
+                    anomaly_status
+                ) = calculate_roi_anomaly_score(
 
-                label_path = os.path.join(
-                    search_dir,
-                    label_file
+                    anomaly_model,
+
+                    anomaly_device,
+
+                    img_path,
+
+                    anomaly_label_path
                 )
 
-                if os.path.exists(
-                    label_path
-                ):
+            # =================================================
+            # BELT MASK
+            # =================================================
 
-                    polygon = load_belt_roi(
-                        label_path,
-                        img_w,
-                        img_h
+            if use_roi:
+
+                search_dirs = [
+
+                    os.path.join(
+                        image_dir,
+                        "..",
+                        "labels"
+                    ),
+
+                    labels_dir_default,
+
+                    os.path.dirname(
+                        img_path
+                    )
+                ]
+
+                label_file = (
+                    base_name
+                    + ".txt"
+                )
+
+                for search_dir in search_dirs:
+
+                    label_path = os.path.join(
+                        search_dir,
+                        label_file
                     )
 
-                    if polygon is not None:
+                    if os.path.exists(
+                        label_path
+                    ):
 
-                        belt_mask = (
-                            create_belt_mask(
-                                img_w,
-                                img_h,
-                                polygon
+                        polygon = load_belt_roi(
+
+                            label_path,
+
+                            original_width,
+
+                            original_height
+                        )
+
+                        if polygon is not None:
+
+                            belt_mask = (
+                                create_belt_mask(
+
+                                    original_width,
+
+                                    original_height,
+
+                                    polygon
+                                )
                             )
-                        )
 
-                    break
+                        break
 
-        # ----------------------------------------------------
-        # MASK
-        # ----------------------------------------------------
+            # =================================================
+            # CREATE RESIZED MASK
+            # =================================================
 
-        if belt_mask is not None:
+            if belt_mask is not None:
 
-            masked_cv = mask_image(
-                img_cv,
-                belt_mask
+                resized_mask = cv2.resize(
+
+                    belt_mask,
+
+                    (
+                        resized_w,
+                        resized_h
+                    ),
+
+                    interpolation=cv2.INTER_NEAREST
+                )
+
+                masked_cv = mask_image(
+
+                    resized_cv,
+
+                    resized_mask
+                )
+
+                del resized_mask
+
+            else:
+
+                masked_cv = resized_cv.copy()
+
+            # =================================================
+            # YOLO
+            # =================================================
+
+            print(
+                "Running YOLO inference..."
             )
 
-        else:
+            all_detections = (
+                run_yolo_detection(
 
-            masked_cv = img_cv
+                    model,
 
-        # ====================================================
-        # YOLO INFERENCE
-        # ====================================================
+                    masked_cv,
 
-        all_detections = []
+                    conf_threshold,
 
-        try:
+                    scale_x,
 
-            results = model.predict(
-                source=masked_cv,
-                conf=conf_threshold,
-                imgsz=640,
-                device=DEVICE,
-                verbose=False,
-                stream=True
+                    scale_y,
+
+                    original_width,
+
+                    original_height
+                )
             )
 
-            for r in results:
+            # =================================================
+            # OPTIONAL TTA
+            # =================================================
 
-                if r.boxes is None:
-                    continue
+            if tta:
 
-                for box in r.boxes:
+                print(
+                    "Running horizontal TTA..."
+                )
 
-                    x1, y1, x2, y2 = (
-                        box.xyxy[0].tolist()
+                tta_detections = run_tta(
+
+                    model,
+
+                    masked_cv,
+
+                    conf_threshold,
+
+                    scale_x,
+
+                    scale_y,
+
+                    original_width,
+
+                    original_height
+                )
+
+                all_detections.extend(
+                    tta_detections
+                )
+
+                all_detections = (
+                    nms_detections(
+                        all_detections,
+                        iou_thresh=0.5
                     )
+                )
 
-                    cls = int(
-                        box.cls[0].item()
+            # =================================================
+            # ROI FILTER
+            # =================================================
+
+            if belt_mask is not None:
+
+                all_detections = (
+                    filter_detections_in_belt(
+
+                        all_detections,
+
+                        belt_mask
                     )
+                )
 
-                    conf = float(
-                        box.conf[0].item()
+            # =================================================
+            # ANOMALY
+            # =================================================
+
+            if (
+                anomaly_status
+                == "ANOMALOUS"
+            ):
+
+                anomalous_images += 1
+
+            # =================================================
+            # HEALTH
+            # =================================================
+
+            health_info = (
+                calculate_health_score(
+
+                    all_detections,
+
+                    roi_anomaly_score,
+
+                    ANOMALY_THRESHOLD
+                )
+            )
+
+            # =================================================
+            # SORT
+            # =================================================
+
+            all_detections.sort(
+
+                key=lambda d:
+                    d["confidence"],
+
+                reverse=True
+            )
+
+            # =================================================
+            # ANNOTATED IMAGE
+            # =================================================
+
+            img_pil = Image.fromarray(
+
+                cv2.cvtColor(
+
+                    img_cv,
+
+                    cv2.COLOR_BGR2RGB
+                )
+            )
+
+            annotated_img = (
+                draw_detections(
+
+                    img_pil,
+
+                    all_detections
+                )
+            )
+
+            out_img_path = os.path.join(
+
+                output_dir,
+
+                base_name
+                + ".jpg"
+            )
+
+            if annotated_img.mode != "RGB":
+
+                annotated_img = (
+                    annotated_img.convert(
+                        "RGB"
                     )
+                )
 
-                    bbox = [
-                        round(x1),
-                        round(y1),
-                        round(x2),
-                        round(y2)
-                    ]
+            annotated_img.save(
 
-                    severity_info = (
-                        calculate_severity(
-                            bbox,
-                            img_w,
-                            img_h
-                        )
-                    )
+                out_img_path,
 
-                    maintenance = (
-                        calculate_maintenance_priority(
-                            severity_info[
-                                "severity"
-                            ],
-                            conf
-                        )
-                    )
+                format="JPEG",
 
-                    all_detections.append(
-                        {
-                            "class": cls,
+                quality=85,
 
-                            "class_name":
-                                CLASS_NAMES.get(
-                                    cls,
-                                    f"cls{cls}"
-                                ),
+                optimize=True
+            )
 
-                            "confidence":
-                                round(
-                                    conf,
-                                    4
-                                ),
+            # =================================================
+            # GRAD-CAM
+            # =================================================
 
-                            "bbox":
-                                bbox,
+            gradcam_output_path = os.path.join(
 
-                            "severity_score":
-                                severity_info[
-                                    "severity_score"
-                                ],
+                output_dir,
 
-                            "area_ratio":
-                                severity_info[
-                                    "area_ratio"
-                                ],
+                base_name
+                + "_gradcam.jpg"
+            )
 
-                            "severity":
-                                severity_info[
-                                    "severity"
-                                ],
+            (
+                gradcam_status,
+                gradcam_file,
+                gradcam_error
+            ) = run_gradcam_if_enabled(
 
-                            "maintenance_priority":
-                                maintenance
-                        }
-                    )
+                model,
 
-            del results
+                img_path,
+
+                gradcam_output_path
+            )
+
+            # =================================================
+            # JSON
+            # =================================================
+
+            det_json = {
+
+                "image":
+                    img_file,
+
+                "image_width":
+                    original_width,
+
+                "image_height":
+                    original_height,
+
+                "model":
+                    model_path,
+
+                "confidence_threshold":
+                    conf_threshold,
+
+                "inference_size":
+                    DETECTION_SIZE,
+
+                "health":
+                    health_info,
+
+                "anomaly_detection": {
+
+                    "model":
+                        str(
+                            ANOMALY_MODEL_PATH
+                        ),
+
+                    "threshold":
+                        ANOMALY_THRESHOLD,
+
+                    "anomaly_score":
+                        roi_anomaly_score,
+
+                    "status":
+                        anomaly_status,
+
+                    "method":
+                        "ROI convolutional autoencoder"
+                },
+
+                "explainability": {
+
+                    "method":
+                        "Grad-CAM",
+
+                    "status":
+                        gradcam_status,
+
+                    "output":
+                        (
+                            os.path.basename(
+                                gradcam_file
+                            )
+                            if gradcam_file
+                            else None
+                        ),
+
+                    "error":
+                        gradcam_error
+                },
+
+                "detections":
+                    all_detections
+            }
+
+            out_json_path = os.path.join(
+
+                output_dir,
+
+                base_name
+                + ".json"
+            )
+
+            with open(
+                out_json_path,
+                "w"
+            ) as f:
+
+                json.dump(
+
+                    det_json,
+
+                    f,
+
+                    indent=2
+                )
+
+            # =================================================
+            # COUNTERS
+            # =================================================
+
+            total_detections += (
+                len(
+                    all_detections
+                )
+            )
+
+            if all_detections:
+
+                images_with_detections += 1
+
+            # =================================================
+            # LOG RESULT
+            # =================================================
+
+            print(
+                f"Detections: "
+                f"{len(all_detections)}"
+            )
+
+            print(
+                f"Health score: "
+                f"{health_info['score']}"
+            )
+
+            print(
+                f"Health status: "
+                f"{health_info['status']}"
+            )
+
+            print(
+                f"Anomaly: "
+                f"{anomaly_status}"
+            )
+
+            print(
+                f"Output: "
+                f"{out_img_path}"
+            )
 
         except Exception as e:
 
             print(
-                "WARNING: YOLO inference failed:"
+                "\nWARNING: Image processing failed:"
             )
 
-            print(e)
-
-        # ====================================================
-        # TTA
-        # ====================================================
-
-        if tta:
-
-            # ------------------------------------------------
-            # HORIZONTAL FLIP
-            # ------------------------------------------------
-
-            flipped = cv2.flip(
-                masked_cv,
-                1
+            print(
+                f"{type(e).__name__}: {e}"
             )
 
-            try:
+        finally:
 
-                results_flip = model.predict(
-                    source=flipped,
-                    conf=conf_threshold,
-                    imgsz=640,
-                    device=DEVICE,
-                    verbose=False,
-                    stream=True
-                )
+            # =================================================
+            # IMPORTANT MEMORY CLEANUP
+            # =================================================
 
-                for r in results_flip:
+            if img_cv is not None:
 
-                    if r.boxes is None:
-                        continue
+                del img_cv
 
-                    for box in r.boxes:
+            if resized_cv is not None:
 
-                        x1, y1, x2, y2 = (
-                            box.xyxy[0].tolist()
-                        )
+                del resized_cv
 
-                        x1_new = (
-                            img_w - x2
-                        )
+            if masked_cv is not None:
 
-                        x2_new = (
-                            img_w - x1
-                        )
+                del masked_cv
 
-                        cls = int(
-                            box.cls[0].item()
-                        )
+            if belt_mask is not None:
 
-                        conf = float(
-                            box.conf[0].item()
-                        )
+                del belt_mask
 
-                        bbox = [
-                            round(x1_new),
-                            round(y1),
-                            round(x2_new),
-                            round(y2)
-                        ]
+            if img_pil is not None:
 
-                        severity_info = (
-                            calculate_severity(
-                                bbox,
-                                img_w,
-                                img_h
-                            )
-                        )
+                del img_pil
 
-                        maintenance = (
-                            calculate_maintenance_priority(
-                                severity_info[
-                                    "severity"
-                                ],
-                                conf
-                            )
-                        )
+            if annotated_img is not None:
 
-                        all_detections.append(
-                            {
-                                "class": cls,
+                del annotated_img
 
-                                "class_name":
-                                    CLASS_NAMES.get(
-                                        cls,
-                                        f"cls{cls}"
-                                    ),
+            cleanup_memory()
 
-                                "confidence":
-                                    round(
-                                        conf,
-                                        4
-                                    ),
-
-                                "bbox":
-                                    bbox,
-
-                                "severity_score":
-                                    severity_info[
-                                        "severity_score"
-                                    ],
-
-                                "area_ratio":
-                                    severity_info[
-                                        "area_ratio"
-                                    ],
-
-                                "severity":
-                                    severity_info[
-                                        "severity"
-                                    ],
-
-                                "maintenance_priority":
-                                    maintenance
-                            }
-                        )
-
-                del results_flip
-
-            except Exception as e:
-
-                print(
-                    "WARNING: Horizontal TTA failed:"
-                )
-
-                print(e)
-
-            del flipped
-
-            # ------------------------------------------------
-            # VERTICAL + HORIZONTAL FLIP
-            # ------------------------------------------------
-
-            flipped_v = cv2.flip(
-                masked_cv,
-                -1
+            print(
+                "Memory cleanup completed."
             )
-
-            try:
-
-                results_flip_v = model.predict(
-                    source=flipped_v,
-                    conf=conf_threshold,
-                    imgsz=640,
-                    device=DEVICE,
-                    verbose=False,
-                    stream=True
-                )
-
-                for r in results_flip_v:
-
-                    if r.boxes is None:
-                        continue
-
-                    for box in r.boxes:
-
-                        x1, y1, x2, y2 = (
-                            box.xyxy[0].tolist()
-                        )
-
-                        x1_new = (
-                            img_w - x2
-                        )
-
-                        x2_new = (
-                            img_w - x1
-                        )
-
-                        y1_new = (
-                            img_h - y2
-                        )
-
-                        y2_new = (
-                            img_h - y1
-                        )
-
-                        cls = int(
-                            box.cls[0].item()
-                        )
-
-                        conf = float(
-                            box.conf[0].item()
-                        )
-
-                        bbox = [
-                            round(x1_new),
-                            round(y1_new),
-                            round(x2_new),
-                            round(y2_new)
-                        ]
-
-                        severity_info = (
-                            calculate_severity(
-                                bbox,
-                                img_w,
-                                img_h
-                            )
-                        )
-
-                        maintenance = (
-                            calculate_maintenance_priority(
-                                severity_info[
-                                    "severity"
-                                ],
-                                conf
-                            )
-                        )
-
-                        all_detections.append(
-                            {
-                                "class": cls,
-
-                                "class_name":
-                                    CLASS_NAMES.get(
-                                        cls,
-                                        f"cls{cls}"
-                                    ),
-
-                                "confidence":
-                                    round(
-                                        conf,
-                                        4
-                                    ),
-
-                                "bbox":
-                                    bbox,
-
-                                "severity_score":
-                                    severity_info[
-                                        "severity_score"
-                                    ],
-
-                                "area_ratio":
-                                    severity_info[
-                                        "area_ratio"
-                                    ],
-
-                                "severity":
-                                    severity_info[
-                                        "severity"
-                                    ],
-
-                                "maintenance_priority":
-                                    maintenance
-                            }
-                        )
-
-                del results_flip_v
-
-            except Exception as e:
-
-                print(
-                    "WARNING: Vertical TTA failed:"
-                )
-
-                print(e)
-
-            del flipped_v
-
-            # ------------------------------------------------
-            # NMS
-            # ------------------------------------------------
-
-            all_detections = (
-                nms_detections(
-                    all_detections,
-                    iou_thresh=0.5
-                )
-            )
-
-        # ====================================================
-        # ROI FILTER
-        # ====================================================
-
-        if belt_mask is not None:
-
-            all_detections = (
-                filter_detections_in_belt(
-                    all_detections,
-                    belt_mask
-                )
-            )
-
-        # ====================================================
-        # ANOMALY COUNTER
-        # ====================================================
-
-        if (
-            anomaly_status
-            == "ANOMALOUS"
-        ):
-
-            anomalous_images += 1
-
-        # ====================================================
-        # HEALTH SCORE
-        # ====================================================
-
-        health_info = (
-            calculate_health_score(
-                all_detections,
-                roi_anomaly_score,
-                ANOMALY_THRESHOLD
-            )
-        )
-
-        # ====================================================
-        # SORT
-        # ====================================================
-
-        all_detections.sort(
-            key=lambda d:
-                d["confidence"],
-            reverse=True
-        )
-
-        # ====================================================
-        # ANNOTATED IMAGE
-        # ====================================================
-
-        # Convert only when needed.
-        img_pil = Image.fromarray(
-            cv2.cvtColor(
-                img_cv,
-                cv2.COLOR_BGR2RGB
-            )
-        )
-
-        annotated_img = (
-            draw_detections(
-                img_pil,
-                all_detections
-            )
-        )
-
-        out_img_path = os.path.join(
-            output_dir,
-            base_name + ".jpg"
-        )
-
-        if annotated_img.mode != "RGB":
-
-            annotated_img = (
-                annotated_img.convert(
-                    "RGB"
-                )
-            )
-
-        annotated_img.save(
-            out_img_path,
-            quality=90,
-            optimize=True
-        )
-
-        # ====================================================
-        # JSON
-        # ====================================================
-
-        det_json = {
-
-            "image":
-                img_file,
-
-            "image_width":
-                img_w,
-
-            "image_height":
-                img_h,
-
-            "model":
-                model_path,
-
-            "confidence_threshold":
-                conf_threshold,
-
-            "anomaly_detection": {
-
-                "model":
-                    str(
-                        ANOMALY_MODEL_PATH
-                    ),
-
-                "threshold":
-                    ANOMALY_THRESHOLD,
-
-                "anomaly_score":
-                    roi_anomaly_score,
-
-                "status":
-                    anomaly_status,
-
-                "method":
-                    "ROI convolutional autoencoder"
-            },
-
-            "health": {
-
-                "score":
-                    health_info[
-                        "score"
-                    ],
-
-                "status":
-                    health_info[
-                        "status"
-                    ],
-
-                "defect_condition":
-                    health_info[
-                        "defect_condition"
-                    ],
-
-                "severity_condition":
-                    health_info[
-                        "severity_condition"
-                    ],
-
-                "anomaly_condition":
-                    health_info[
-                        "anomaly_condition"
-                    ],
-
-                "defect_weight":
-                    health_info[
-                        "defect_weight"
-                    ],
-
-                "severity_weight":
-                    health_info[
-                        "severity_weight"
-                    ],
-
-                "anomaly_weight":
-                    health_info[
-                        "anomaly_weight"
-                    ],
-
-                "method":
-                    health_info[
-                        "method"
-                    ]
-            },
-
-            "explainability": {
-
-                "method":
-                    "Grad-CAM",
-
-                "status":
-                    gradcam_status,
-
-                "output":
-                    (
-                        os.path.basename(
-                            gradcam_file
-                        )
-                        if gradcam_file
-                        else None
-                    ),
-
-                "error":
-                    gradcam_error
-            },
-
-            "detections":
-                all_detections
-        }
-
-        out_json_path = os.path.join(
-            output_dir,
-            base_name + ".json"
-        )
-
-        with open(
-            out_json_path,
-            "w"
-        ) as f:
-
-            json.dump(
-                det_json,
-                f,
-                indent=2
-            )
-
-        # ====================================================
-        # COUNTERS
-        # ====================================================
-
-        total_detections += (
-            len(all_detections)
-        )
-
-        if all_detections:
-
-            images_with_detections += 1
-
-        # ====================================================
-        # MEMORY CLEANUP
-        # ====================================================
-
-        del img_cv
-        del masked_cv
-        del img_pil
-        del annotated_img
-
-        if belt_mask is not None:
-
-            del belt_mask
-
-        gc.collect()
-
-        if torch.cuda.is_available():
-
-            torch.cuda.empty_cache()
 
     # ========================================================
     # FINAL CLEANUP
@@ -2080,11 +2419,7 @@ def run_pipeline(
 
     del model
 
-    gc.collect()
-
-    if torch.cuda.is_available():
-
-        torch.cuda.empty_cache()
+    cleanup_memory()
 
     # ========================================================
     # SUMMARY
@@ -2133,6 +2468,11 @@ def run_pipeline(
     )
 
     print(
+        f"YOLO inference size: "
+        f"{DETECTION_SIZE}"
+    )
+
+    print(
         f"Grad-CAM enabled: "
         f"{ENABLE_GRADCAM}"
     )
@@ -2143,6 +2483,7 @@ def run_pipeline(
     )
 
     return {
+
         "images_processed":
             len(image_files),
 
@@ -2170,55 +2511,86 @@ def run_pipeline(
 def main():
 
     parser = argparse.ArgumentParser(
+
         description=
         "BeltGuard conveyor belt "
         "monitoring pipeline"
     )
 
     parser.add_argument(
+
         "--image_dir",
+
         type=str,
+
         required=True,
-        help="Path to image folder"
+
+        help=
+        "Path to image folder"
     )
 
     parser.add_argument(
+
         "--output_dir",
+
         type=str,
+
         required=True,
-        help="Output folder"
+
+        help=
+        "Output folder"
     )
 
     parser.add_argument(
+
         "--model",
+
         type=str,
+
         default=None,
-        help="Path to YOLO model"
+
+        help=
+        "Path to YOLO model"
     )
 
     parser.add_argument(
+
         "--conf",
+
         type=float,
+
         default=DEFAULT_CONFIDENCE,
-        help="Confidence threshold"
+
+        help=
+        "Confidence threshold"
     )
 
     parser.add_argument(
+
         "--roi",
+
         action="store_true",
-        help="Enable belt ROI masking and anomaly detection"
+
+        help=
+        "Enable belt ROI "
+        "masking and anomaly detection"
     )
 
     parser.add_argument(
+
         "--tta",
+
         action="store_true",
-        help="Enable test-time augmentation"
+
+        help=
+        "Enable horizontal "
+        "test-time augmentation"
     )
 
     args = parser.parse_args()
 
     # ========================================================
-    # VALIDATE IMAGE DIRECTORY
+    # VALIDATE
     # ========================================================
 
     if not os.path.isdir(
@@ -2226,7 +2598,8 @@ def main():
     ):
 
         print(
-            f"ERROR: Image directory not found: "
+            f"ERROR: Image directory "
+            f"not found: "
             f"{args.image_dir}"
         )
 
@@ -2237,14 +2610,28 @@ def main():
     # ========================================================
 
     run_pipeline(
-        image_dir=args.image_dir,
-        output_dir=args.output_dir,
-        model_path=args.model,
-        conf_threshold=args.conf,
-        use_roi=args.roi,
-        tta=args.tta
+
+        image_dir=
+            args.image_dir,
+
+        output_dir=
+            args.output_dir,
+
+        model_path=
+            args.model,
+
+        conf_threshold=
+            args.conf,
+
+        use_roi=
+            args.roi,
+
+        tta=
+            args.tta
     )
 
+
+# ============================================================
 
 if __name__ == "__main__":
 
