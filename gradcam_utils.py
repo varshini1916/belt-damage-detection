@@ -3,31 +3,88 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 
 class YOLOGradCAMTarget:
     """
-    Converts YOLO model output into a scalar target
-    that Grad-CAM can use for gradient computation.
+    Gradient target for Ultralytics YOLO detection output.
+
+    The target selects the detection-related values from the
+    model output and converts them into a scalar for Grad-CAM.
     """
 
     def __call__(self, model_output):
 
-        # Handle tuple/list outputs
+        # YOLO output can sometimes be wrapped in a tuple/list.
         if isinstance(model_output, (tuple, list)):
             model_output = model_output[0]
 
-        # Make sure output is a tensor
         if not torch.is_tensor(model_output):
             raise TypeError(
                 f"Unexpected YOLO output type: "
                 f"{type(model_output)}"
             )
 
-        # Convert YOLO output into a scalar
+        # Make sure we have a tensor connected to the graph.
+        if not model_output.requires_grad:
+            raise RuntimeError(
+                "YOLO model output does not require gradients. "
+                "Grad-CAM cannot be generated from this output."
+            )
+
+        # Flatten the output and create a scalar target.
         return model_output.reshape(-1).sum()
+
+
+def _find_target_layer(model):
+    """
+    Find a suitable convolutional layer in the YOLO model.
+
+    Preference:
+        1. Last 3x3 Conv2d layer
+        2. Otherwise last Conv2d layer
+    """
+
+    conv_layers = [
+        module
+        for module in model.modules()
+        if isinstance(module, torch.nn.Conv2d)
+    ]
+
+    if not conv_layers:
+        raise RuntimeError(
+            "No Conv2d layer found in YOLO model."
+        )
+
+    print(
+        f"Found {len(conv_layers)} Conv2d layers."
+    )
+
+    # Prefer the last 3x3 convolution.
+    for layer in reversed(conv_layers):
+
+        if layer.kernel_size == (3, 3):
+
+            print(
+                "Selected Grad-CAM++ layer:"
+            )
+
+            print(layer)
+
+            return layer
+
+    # Fallback.
+    target_layer = conv_layers[-1]
+
+    print(
+        "Selected final Conv2d layer:"
+    )
+
+    print(target_layer)
+
+    return target_layer
 
 
 def generate_gradcam(
@@ -36,21 +93,25 @@ def generate_gradcam(
     output_path
 ):
     """
-    Memory-efficient Grad-CAM visualization
-    for a YOLO detection model.
+    Generate a memory-efficient Grad-CAM++ visualization
+    for an Ultralytics YOLO detection model.
 
-    Designed for low-memory deployment environments
-    such as Render Free (512 MB).
-
-    Processing resolution:
-        320 x 320
-
-    Final image:
-        Original image dimensions
+    Processing:
+        Original image
+            ↓
+        Resize to 640x640
+            ↓
+        Grad-CAM++
+            ↓
+        Generate visualization
+            ↓
+        Resize back to original dimensions
+            ↓
+        Save output
     """
 
     print(
-        f"Generating Grad-CAM for: {image_path}"
+        f"Generating Grad-CAM++ for: {image_path}"
     )
 
     # =====================================================
@@ -86,14 +147,7 @@ def generate_gradcam(
     # MEMORY-SAFE CAM SIZE
     # =====================================================
 
-    # 320 instead of 640.
-    #
-    # This significantly reduces:
-    # - activation memory
-    # - gradient memory
-    # - CAM memory
-    #
-    CAM_SIZE = 320
+    CAM_SIZE = 640
 
     resized_rgb = cv2.resize(
         image_rgb,
@@ -101,10 +155,7 @@ def generate_gradcam(
         interpolation=cv2.INTER_AREA
     )
 
-    # =====================================================
-    # FLOAT IMAGE
-    # =====================================================
-
+    # Float image for visualization.
     rgb_float = (
         resized_rgb.astype(
             np.float32
@@ -117,23 +168,32 @@ def generate_gradcam(
 
     tensor = torch.from_numpy(
         rgb_float.transpose(2, 0, 1)
-    ).unsqueeze(0)
-
-    tensor = tensor.float()
+    ).unsqueeze(0).float()
 
     # =====================================================
-    # FIND MODEL DEVICE
+    # GET YOLO PYTORCH MODEL
+    # =====================================================
+
+    if hasattr(model, "model"):
+        torch_model = model.model
+    else:
+        torch_model = model
+
+    # =====================================================
+    # DETERMINE DEVICE
     # =====================================================
 
     try:
 
         device = next(
-            model.model.parameters()
+            torch_model.parameters()
         ).device
 
     except StopIteration:
 
-        device = torch.device("cpu")
+        device = torch.device(
+            "cpu"
+        )
 
     print(
         f"Grad-CAM device: {device}"
@@ -142,87 +202,49 @@ def generate_gradcam(
     tensor = tensor.to(device)
 
     # =====================================================
-    # SAVE ORIGINAL TRAINING STATE
+    # SAVE ORIGINAL MODEL STATE
     # =====================================================
 
     previous_training_state = (
-        model.model.training
+        torch_model.training
     )
 
     # =====================================================
     # ENABLE GRADIENTS
     # =====================================================
 
-    model.model.train()
+    torch_model.train()
 
-    # Only parameters need gradients for Grad-CAM.
-    for parameter in model.model.parameters():
+    for parameter in torch_model.parameters():
 
         parameter.requires_grad_(True)
 
     # =====================================================
-    # FIND CONVOLUTIONAL LAYERS
+    # DISABLE INFERENCE-ONLY BEHAVIOR
     # =====================================================
 
-    conv_layers = []
+    # IMPORTANT:
+    # Do NOT use torch.no_grad() here.
+    # Grad-CAM requires a computational graph.
 
-    for module in model.model.modules():
+    # =====================================================
+    # FIND TARGET LAYER
+    # =====================================================
 
-        if isinstance(
-            module,
-            torch.nn.Conv2d
-        ):
-
-            conv_layers.append(module)
-
-    if not conv_layers:
-
-        raise RuntimeError(
-            "No Conv2d layer found in YOLO model."
-        )
-
-    print(
-        f"Found {len(conv_layers)} Conv2d layers."
+    target_layer = _find_target_layer(
+        torch_model
     )
 
     # =====================================================
-    # SELECT TARGET LAYER
-    # =====================================================
-
-    target_layer = None
-
-    # Prefer the last 3x3 convolution.
-    for layer in reversed(conv_layers):
-
-        if layer.kernel_size == (3, 3):
-
-            target_layer = layer
-
-            break
-
-    # Fallback to last convolution.
-    if target_layer is None:
-
-        target_layer = conv_layers[-1]
-
-    print(
-        "Selected Grad-CAM layer:"
-    )
-
-    print(
-        target_layer
-    )
-
-    # =====================================================
-    # CREATE GRAD-CAM
+    # INITIALIZE GRAD-CAM++
     # =====================================================
 
     cam = None
 
     try:
 
-        cam = GradCAM(
-            model=model.model,
+        cam = GradCAMPlusPlus(
+            model=torch_model,
             target_layers=[
                 target_layer
             ]
@@ -237,7 +259,7 @@ def generate_gradcam(
         # =================================================
 
         print(
-            "Generating Grad-CAM heatmap..."
+            "Generating Grad-CAM++ heatmap..."
         )
 
         with torch.enable_grad():
@@ -250,7 +272,7 @@ def generate_gradcam(
     finally:
 
         # =================================================
-        # RELEASE CAM RESOURCES
+        # CLEAN UP CAM
         # =================================================
 
         if cam is not None:
@@ -260,33 +282,22 @@ def generate_gradcam(
             except Exception:
                 pass
 
-            del cam
-
         # =================================================
         # RESTORE MODEL STATE
         # =================================================
 
         if previous_training_state:
 
-            model.model.train()
+            torch_model.train()
 
         else:
 
-            model.model.eval()
+            torch_model.eval()
 
-        # =================================================
-        # RELEASE INPUT TENSOR
-        # =================================================
+        # Restore parameter gradient settings.
+        for parameter in torch_model.parameters():
 
-        del tensor
-
-        # =================================================
-        # CLEAR GPU CACHE IF AVAILABLE
-        # =================================================
-
-        if torch.cuda.is_available():
-
-            torch.cuda.empty_cache()
+            parameter.requires_grad_(False)
 
     # =====================================================
     # CLEAN CAM
@@ -311,7 +322,7 @@ def generate_gradcam(
     )
 
     # =====================================================
-    # RESIZE CAM TO 320x320
+    # RESIZE CAM TO 640x640
     # =====================================================
 
     grayscale_cam = cv2.resize(
@@ -321,7 +332,7 @@ def generate_gradcam(
     )
 
     # =====================================================
-    # CREATE VISUALIZATION
+    # GENERATE HEATMAP
     # =====================================================
 
     visualization_small = show_cam_on_image(
@@ -331,7 +342,7 @@ def generate_gradcam(
     )
 
     # =====================================================
-    # RESIZE TO ORIGINAL IMAGE
+    # RESIZE TO ORIGINAL IMAGE SIZE
     # =====================================================
 
     if (
@@ -386,12 +397,12 @@ def generate_gradcam(
     if not success:
 
         raise RuntimeError(
-            f"Could not save Grad-CAM "
+            f"Could not save Grad-CAM++ "
             f"result to: {output_path}"
         )
 
     print(
-        "Grad-CAM completed successfully!"
+        "Grad-CAM++ completed successfully!"
     )
 
     print(
