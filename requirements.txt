@@ -12,4 +12,4 @@ scikit-learn
 xgboost
 shap
 joblib
-grad-cam
+grad-cam==1.5.5
