@@ -1,0 +1,123 @@
+{
+  "image": "test.jpg",
+  "image_width": 3840,
+  "image_height": 2160,
+  "model": "E:\\Projects\\belt-damage-detection\\runs\\train\\belt_damage_improved\\weights\\best.pt",
+  "confidence_threshold": 0.24,
+  "anomaly_detection": {
+    "model": "E:\\Projects\\belt-damage-detection\\models\\belt_roi_autoencoder.pt",
+    "threshold": 0.001486,
+    "anomaly_score": null,
+    "status": "UNAVAILABLE",
+    "method": "ROI convolutional autoencoder"
+  },
+  "health": {
+    "score": 59.01,
+    "status": "DEGRADED",
+    "defect_condition": 45.45,
+    "severity_condition": 39.22,
+    "anomaly_condition": 100.0,
+    "defect_weight": 0.25,
+    "severity_weight": 0.45,
+    "anomaly_weight": 0.3,
+    "method": "Normalized weighted visual condition score"
+  },
+  "explainability": {
+    "method": "Grad-CAM++",
+    "status": "GENERATED",
+    "output": "test_gradcam.jpg",
+    "error": null
+  },
+  "detections": [
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.4935,
+      "bbox": [
+        396,
+        146,
+        547,
+        1085
+      ],
+      "severity_score": 85.47,
+      "area_ratio": 0.017095,
+      "severity": "High",
+      "maintenance_priority": "IMMEDIATE INSPECTION"
+    },
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.4814,
+      "bbox": [
+        1406,
+        11,
+        1550,
+        901
+      ],
+      "severity_score": 77.26,
+      "area_ratio": 0.015451,
+      "severity": "High",
+      "maintenance_priority": "IMMEDIATE INSPECTION"
+    },
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.3024,
+      "bbox": [
+        1390,
+        0,
+        1535,
+        1046
+      ],
+      "severity_score": 91.43,
+      "area_ratio": 0.018286,
+      "severity": "High",
+      "maintenance_priority": "IMMEDIATE INSPECTION"
+    },
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.2939,
+      "bbox": [
+        1423,
+        0,
+        1568,
+        742
+      ],
+      "severity_score": 64.86,
+      "area_ratio": 0.012971,
+      "severity": "High",
+      "maintenance_priority": "IMMEDIATE INSPECTION"
+    },
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.2696,
+      "bbox": [
+        1402,
+        0,
+        1551,
+        657
+      ],
+      "severity_score": 59.01,
+      "area_ratio": 0.011802,
+      "severity": "Medium",
+      "maintenance_priority": "SCHEDULE INSPECTION"
+    },
+    {
+      "class": 1,
+      "class_name": "edge_damage",
+      "confidence": 0.2408,
+      "bbox": [
+        398,
+        0,
+        557,
+        183
+      ],
+      "severity_score": 17.54,
+      "area_ratio": 0.003508,
+      "severity": "Low",
+      "maintenance_priority": "MONITOR / VERIFY"
+    }
+  ]
+}

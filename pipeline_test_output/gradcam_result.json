@@ -1,0 +1,32 @@
+{
+  "image": "gradcam_result.jpg",
+  "image_width": 3840,
+  "image_height": 2160,
+  "model": "E:\\Projects\\belt-damage-detection\\runs\\train\\belt_damage_improved\\weights\\best.pt",
+  "confidence_threshold": 0.24,
+  "anomaly_detection": {
+    "model": "E:\\Projects\\belt-damage-detection\\models\\belt_roi_autoencoder.pt",
+    "threshold": 0.001486,
+    "anomaly_score": null,
+    "status": "UNAVAILABLE",
+    "method": "ROI convolutional autoencoder"
+  },
+  "health": {
+    "score": 100.0,
+    "status": "HEALTHY",
+    "defect_condition": 100.0,
+    "severity_condition": 100.0,
+    "anomaly_condition": 100.0,
+    "defect_weight": 0.25,
+    "severity_weight": 0.45,
+    "anomaly_weight": 0.3,
+    "method": "Normalized weighted visual condition score"
+  },
+  "explainability": {
+    "method": "Grad-CAM++",
+    "status": "GENERATED",
+    "output": "gradcam_result_gradcam.jpg",
+    "error": null
+  },
+  "detections": []
+}

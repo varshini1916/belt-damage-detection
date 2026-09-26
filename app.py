@@ -208,6 +208,14 @@ st.markdown(
         background:#ffffff !important;
         font-size:.92rem !important;
     }
+
+    .tile-kicker { color:#718096; font-size:.66rem; font-weight:800; letter-spacing:.11em; text-transform:uppercase; margin-bottom:.28rem; }
+    .product-tile { background:#fff; border:1px solid #dfe7ee; border-radius:12px; padding:1rem 1.05rem; box-shadow:0 3px 10px rgba(15,23,42,.035); }
+    .product-tile .tile-title { color:#0f172a; font-size:1rem; font-weight:800; margin-bottom:.22rem; }
+    .product-tile .tile-sub { color:#64748b; font-size:.78rem; line-height:1.45; }
+    .product-tile .tile-value { color:#0f172a; font-size:1.75rem; font-weight:850; line-height:1.1; }
+    .product-tile .tile-status { color:#0f766e; font-size:.68rem; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
+    .attention-tile { background:#fff; border:1px solid #dfe7ee; border-radius:12px; padding:1rem; box-shadow:0 3px 10px rgba(15,23,42,.035); }
     </style>
     """,
     unsafe_allow_html=True
@@ -888,17 +896,10 @@ if uploaded_file is not None:
 
         st.markdown('<div class="section-title">Operating condition</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-subtitle">Enter current operating readings when equipment telemetry is available.</div>',
+            '<div class="section-subtitle">Sensor-based operating risk assessment.</div>',
             unsafe_allow_html=True
         )
 
-        st.info(
-            "This XGBoost model is a separate sensor-based "
-            "predictive-maintenance benchmark. Enter machine "
-            "operating values below to estimate failure risk. "
-            "These values are not extracted from the uploaded "
-            "conveyor image."
-        )
 
         failure_model = load_failure_model()
 
@@ -911,7 +912,14 @@ if uploaded_file is not None:
 
         else:
 
-            st.markdown("**Operating readings**")
+            st.markdown(
+                """<div class="product-tile" style="margin-bottom:.65rem;">
+                    <div class="tile-kicker">OPERATING CONDITION</div>
+                    <div class="tile-title">Sensor-based risk assessment</div>
+                    <div class="tile-sub">Enter current equipment readings to assess operating risk.</div>
+                </div>""",
+                unsafe_allow_html=True
+            )
 
             pm1, pm2, pm3 = st.columns(3)
 
@@ -961,10 +969,7 @@ if uploaded_file is not None:
                     step=5
                 )
 
-                st.caption(
-                    "Use actual equipment sensor readings "
-                    "when available."
-                )
+                st.caption("Enter live equipment readings when available.")
 
             if st.button(
                 "Assess operating risk",
@@ -990,6 +995,7 @@ if uploaded_file is not None:
 
                 risk_percent = failure_probability * 100
 
+                st.markdown('<div class="tile-kicker" style="margin-top:.85rem;">OPERATING RISK</div>', unsafe_allow_html=True)
                 r1, r2 = st.columns(2)
 
                 with r1:
@@ -1018,13 +1024,9 @@ if uploaded_file is not None:
                     "shap_explanation": shap_explanation
                 }
 
-                st.caption(
-                    "Risk levels are screening indicators, not calibrated maintenance limits."
-                )
+                st.caption("Screening indicator")
 
-                st.markdown(
-                    "#### Risk drivers"
-                )
+                st.markdown('<div class="tile-kicker">RISK DRIVERS</div>', unsafe_allow_html=True)
 
                 positive = shap_explanation[
                     shap_explanation["SHAP Value"] > 0
@@ -1059,35 +1061,31 @@ if uploaded_file is not None:
                     use_container_width=True
                 )
 
-                st.markdown(
-                    "#### Risk drivers"
-                )
-
-                display_explanation = shap_explanation[
+                with st.expander("View risk drivers", expanded=False):
+                    display_explanation = shap_explanation[
                     ["Feature", "SHAP Value"]
-                ].copy()
+                    ].copy()
 
-                display_explanation["Effect"] = (
+                    display_explanation["Effect"] = (
                     display_explanation["SHAP Value"].apply(
-                        lambda value:
-                        "Higher risk"
-                        if value > 0
-                        else "Lower risk"
-                        if value < 0
-                        else "Neutral"
+                    lambda value:
+                    "Higher risk"
+                    if value > 0
+                    else "Lower risk"
+                    if value < 0
+                    else "Neutral"
                     )
-                )
+                    )
 
-                display_explanation["SHAP Value"] = (
+                    display_explanation["SHAP Value"] = (
                     display_explanation["SHAP Value"].round(4)
-                )
+                    )
 
-                st.dataframe(
+                    st.dataframe(
                     display_explanation,
                     hide_index=True,
                     use_container_width=True
-                )
-
+                    )
                 with st.expander(
                     "Technical details"
                 ):
@@ -1132,9 +1130,9 @@ if uploaded_file is not None:
         st.markdown("---")
         st.markdown('<div class="section-title">Maintenance action</div>', unsafe_allow_html=True)
 
-        st.caption(
-            "Decision-support summary combining visual inspection findings "
-            "with the separate sensor-based predictive-maintenance benchmark."
+        st.markdown(
+            '<div class="section-subtitle">Recommended next action based on the inspection result.</div>',
+            unsafe_allow_html=True
         )
 
         decision_col1, decision_col2 = st.columns(2)
@@ -1279,6 +1277,45 @@ if uploaded_file is not None:
             st.image(
                 result_image,
                 use_container_width=True
+            )
+
+        # =================================================
+        # AI EXPLAINABILITY
+        # =================================================
+
+        explainability = result.get("explainability", {})
+        gradcam_name = explainability.get("output")
+        gradcam_status = explainability.get("status", "FAILED")
+
+        st.markdown('<div class="section-title">AI explainability</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-subtitle">Inspection attention from the vision model.</div>',
+            unsafe_allow_html=True
+        )
+
+        if gradcam_status == "GENERATED" and gradcam_name:
+            gradcam_path = os.path.join(
+                os.path.dirname(output_image_path),
+                gradcam_name
+            )
+
+            if os.path.exists(gradcam_path):
+                st.markdown(
+                    '<div class="attention-tile"><div class="tile-kicker">MODEL ATTENTION</div><div class="tile-title">Grad-CAM++</div></div>',
+                    unsafe_allow_html=True
+                )
+                gradcam_image = Image.open(gradcam_path)
+                st.image(gradcam_image, use_container_width=True)
+                gradcam_image.close()
+            else:
+                st.warning("Inspection attention image is unavailable.")
+        else:
+            st.info("Inspection attention was not generated for this inspection.")
+
+        with st.expander("About this visualization", expanded=False):
+            st.write(
+                "Grad-CAM++ highlights image regions that contributed to the model response. "
+                "It is an explainability visualization, not a defect-severity label."
             )
 
         # =================================================

@@ -30,6 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ultralytics import YOLO
 from belt_roi_autoencoder import BeltAutoencoder, extract_belt_roi
+from gradcam_utils import generate_gradcam
 
 
 # ============================================================
@@ -830,6 +831,52 @@ def run_pipeline(
         img_cv = cv2.imread(img_path)
 
         # ----------------------------------------------------
+        # GRAD-CAM++ EXPLAINABILITY
+        # ----------------------------------------------------
+        # Generate the explanation for the same original image
+        # used for this inspection. Failure of explainability
+        # must never stop the main inspection pipeline.
+        gradcam_output_path = os.path.join(
+            output_dir,
+            base_name + "_gradcam.jpg"
+        )
+
+        gradcam_error = None
+
+        try:
+            print(f"\nGenerating Grad-CAM++ for: {img_file}")
+            generate_gradcam(
+                model=model,
+                image_path=img_path,
+                output_path=gradcam_output_path
+            )
+
+            if os.path.isfile(gradcam_output_path):
+                gradcam_status = "GENERATED"
+                print(
+                    f"Grad-CAM++ file verified: "
+                    f"{gradcam_output_path}"
+                )
+            else:
+                gradcam_status = "FAILED"
+                gradcam_error = (
+                    "Grad-CAM++ completed but the output image "
+                    "was not created."
+                )
+                gradcam_output_path = None
+
+        except Exception as e:
+            gradcam_status = "FAILED"
+            gradcam_output_path = None
+            gradcam_error = f"{type(e).__name__}: {e}"
+
+            print("\n========================================")
+            print("Grad-CAM++ FAILED")
+            print(f"Image: {img_file}")
+            print(f"Error: {gradcam_error}")
+            print("========================================\n")
+
+        # ----------------------------------------------------
         # ROI AUTOENCODER ANOMALY SCORE
         # ----------------------------------------------------
 
@@ -1225,8 +1272,11 @@ def run_pipeline(
         # ANNOTATED IMAGE
         # ----------------------------------------------------
 
+        # Draw directly on the existing PIL image instead of
+        # creating a full-resolution copy. This avoids a large
+        # extra memory allocation for 4K images in Streamlit.
         annotated_img = draw_detections(
-            img_pil.copy(),
+            img_pil,
             all_detections
         )
 
@@ -1242,8 +1292,18 @@ def run_pipeline(
 
         annotated_img.save(
             out_img_path,
-            quality=95
+            quality=90,
+            optimize=True
         )
+
+        # Release the large PIL/OpenCV image objects before the
+        # next image is processed.
+        try:
+            img_pil.close()
+        except Exception:
+            pass
+        del annotated_img
+        del img_cv
 
         # ----------------------------------------------------
         # JSON
@@ -1280,6 +1340,17 @@ def run_pipeline(
                 "severity_weight": health_info["severity_weight"],
                 "anomaly_weight": health_info["anomaly_weight"],
                 "method": health_info["method"]
+            },
+
+            "explainability": {
+                "method": "Grad-CAM++",
+                "status": gradcam_status,
+                "output": (
+                    os.path.basename(gradcam_output_path)
+                    if gradcam_output_path is not None
+                    else None
+                ),
+                "error": gradcam_error
             },
 
             "detections":
