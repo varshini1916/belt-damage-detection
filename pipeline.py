@@ -9,18 +9,32 @@ Features:
 5. Visual severity estimation
 6. Maintenance priority estimation
 7. Annotated images
-8. Detailed JSON output
+8. ROI autoencoder anomaly detection
+9. Health score
+10. Optional Grad-CAM explainability
 
 IMPORTANT:
-Severity is a visual severity PROXY based on relative detected
-bounding-box area. It is NOT a clinically/industrially validated
-physical damage severity label because the dataset does not contain
-human-annotated severity labels.
+- Grad-CAM is DISABLED by default to reduce memory usage.
+- Enable it only when sufficient RAM is available.
+- Severity is a visual severity PROXY based on relative
+  detected bounding-box area.
 """
 
+# ============================================================
+# MEMORY SETTINGS
+# ============================================================
+
 import os
+
+# Reduce CPU thread memory usage.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import gc
 import json
 import argparse
+
 import numpy as np
 import cv2
 import torch
@@ -29,8 +43,10 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from ultralytics import YOLO
-from belt_roi_autoencoder import BeltAutoencoder, extract_belt_roi
-from gradcam_utils import generate_gradcam
+from belt_roi_autoencoder import (
+    BeltAutoencoder,
+    extract_belt_roi
+)
 
 
 # ============================================================
@@ -47,31 +63,70 @@ CLASS_COLORS = {
     1: (0, 0, 255)
 }
 
-# Based on the F1-confidence curve obtained during validation.
+# Based on validation.
 DEFAULT_CONFIDENCE = 0.24
 
-# ROI Autoencoder anomaly detection
+# ROI Autoencoder
 ANOMALY_MODEL_PATH = (
     Path(__file__).resolve().parent
     / "models"
     / "belt_roi_autoencoder.pt"
 )
 
-# Initial unsupervised threshold: 95th percentile
 ANOMALY_THRESHOLD = 0.001486
+
+
+# ============================================================
+# GRADCAM CONFIGURATION
+# ============================================================
+
+# IMPORTANT:
+# False = Render-safe mode
+# True  = Generate Grad-CAM when pipeline runs
+#
+# Keep this FALSE on the Render 512 MB instance.
+ENABLE_GRADCAM = False
+
+# Environment variable can override the setting.
+#
+# Example:
+# BELTGUARD_GRADCAM=true
+#
+if os.getenv(
+    "BELTGUARD_GRADCAM",
+    "false"
+).lower() == "true":
+
+    ENABLE_GRADCAM = True
+
+
+# ============================================================
+# DEVICE
+# ============================================================
+
+# Render free instance should use CPU.
+DEVICE = "cpu"
 
 
 # ============================================================
 # ROI FUNCTIONS
 # ============================================================
 
-def load_belt_roi(label_path, img_w, img_h):
+def load_belt_roi(
+    label_path,
+    img_w,
+    img_h
+):
     """Load belt ROI polygon from YOLO label file."""
 
     if not os.path.exists(label_path):
         return None
 
-    with open(label_path) as f:
+    with open(
+        label_path,
+        "r"
+    ) as f:
+
         line = f.readline().strip()
 
     if not line:
@@ -82,7 +137,10 @@ def load_belt_roi(label_path, img_w, img_h):
     if len(parts) < 7:
         return None
 
-    coords = [float(x) for x in parts[1:]]
+    coords = [
+        float(x)
+        for x in parts[1:]
+    ]
 
     pts = np.array(
         [
@@ -90,7 +148,11 @@ def load_belt_roi(label_path, img_w, img_h):
                 int(coords[i] * img_w),
                 int(coords[i + 1] * img_h)
             )
-            for i in range(0, len(coords), 2)
+            for i in range(
+                0,
+                len(coords),
+                2
+            )
         ],
         dtype=np.int32
     )
@@ -98,10 +160,17 @@ def load_belt_roi(label_path, img_w, img_h):
     return pts
 
 
-def create_belt_mask(img_w, img_h, polygon_pts):
+def create_belt_mask(
+    img_w,
+    img_h,
+    polygon_pts
+):
     """Create binary mask of the belt region."""
 
-    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    mask = np.zeros(
+        (img_h, img_w),
+        dtype=np.uint8
+    )
 
     cv2.fillPoly(
         mask,
@@ -112,17 +181,25 @@ def create_belt_mask(img_w, img_h, polygon_pts):
     return mask
 
 
-def mask_image(img, belt_mask):
+def mask_image(
+    img,
+    belt_mask
+):
     """Apply belt mask to image."""
 
     masked = img.copy()
 
-    masked[belt_mask == 0] = [128, 128, 128]
+    masked[
+        belt_mask == 0
+    ] = [128, 128, 128]
 
     return masked
 
 
-def filter_detections_in_belt(detections, belt_mask):
+def filter_detections_in_belt(
+    detections,
+    belt_mask
+):
     """Keep detections whose center is inside the belt ROI."""
 
     h, w = belt_mask.shape
@@ -133,44 +210,87 @@ def filter_detections_in_belt(detections, belt_mask):
 
         bbox = det["bbox"]
 
-        cx = int((bbox[0] + bbox[2]) / 2)
-        cy = int((bbox[1] + bbox[3]) / 2)
+        cx = int(
+            (bbox[0] + bbox[2]) / 2
+        )
 
-        cx = max(0, min(w - 1, cx))
-        cy = max(0, min(h - 1, cy))
+        cy = int(
+            (bbox[1] + bbox[3]) / 2
+        )
+
+        cx = max(
+            0,
+            min(w - 1, cx)
+        )
+
+        cy = max(
+            0,
+            min(h - 1, cy)
+        )
 
         if belt_mask[cy, cx] > 0:
+
             filtered.append(det)
 
     return filtered
 
 
 # ============================================================
-# ROI AUTOENCODER ANOMALY DETECTION
+# ROI AUTOENCODER
 # ============================================================
 
 def load_anomaly_model():
+
     if not ANOMALY_MODEL_PATH.exists():
-        print(f"WARNING: ROI Autoencoder not found: {ANOMALY_MODEL_PATH}")
+
+        print(
+            "WARNING: ROI Autoencoder not found:"
+        )
+
+        print(
+            ANOMALY_MODEL_PATH
+        )
+
         return None, torch.device("cpu")
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device("cpu")
 
-    model = BeltAutoencoder().to(device)
+    try:
 
-    model.load_state_dict(
-        torch.load(
+        model = BeltAutoencoder().to(device)
+
+        state_dict = torch.load(
             ANOMALY_MODEL_PATH,
-            map_location=device
+            map_location=device,
+            weights_only=True
         )
-    )
 
-    model.eval()
+        model.load_state_dict(
+            state_dict
+        )
 
-    print(f"ROI Autoencoder loaded: {ANOMALY_MODEL_PATH}")
-    return model, device
+        del state_dict
+
+        model.eval()
+
+        print(
+            f"ROI Autoencoder loaded: "
+            f"{ANOMALY_MODEL_PATH}"
+        )
+
+        return model, device
+
+    except Exception as e:
+
+        print(
+            "WARNING: Could not load ROI Autoencoder:"
+        )
+
+        print(e)
+
+        gc.collect()
+
+        return None, device
 
 
 def calculate_roi_anomaly_score(
@@ -179,29 +299,61 @@ def calculate_roi_anomaly_score(
     image_path,
     label_path
 ):
+
     if model is None:
+
         return None, "UNAVAILABLE"
 
     try:
-        roi = extract_belt_roi(image_path, label_path)
+
+        roi = extract_belt_roi(
+            image_path,
+            label_path
+        )
 
         if roi is None or roi.size == 0:
+
             return None, "ROI_UNAVAILABLE"
 
-        roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-        roi = cv2.resize(roi, (128, 128))
-        roi = roi.astype(np.float32) / 255.0
-        roi = np.transpose(roi, (2, 0, 1))
-
-        tensor = torch.tensor(
+        roi = cv2.cvtColor(
             roi,
-            dtype=torch.float32
-        ).unsqueeze(0).to(device)
+            cv2.COLOR_BGR2RGB
+        )
+
+        roi = cv2.resize(
+            roi,
+            (128, 128),
+            interpolation=cv2.INTER_AREA
+        )
+
+        roi = (
+            roi.astype(
+                np.float32
+            ) / 255.0
+        )
+
+        roi = np.transpose(
+            roi,
+            (2, 0, 1)
+        )
+
+        tensor = torch.from_numpy(
+            roi
+        ).unsqueeze(0)
+
+        tensor = tensor.to(device)
 
         with torch.no_grad():
-            reconstructed = model(tensor)
+
+            reconstructed = model(
+                tensor
+            )
+
             error = torch.mean(
-                (tensor - reconstructed) ** 2
+                (
+                    tensor
+                    - reconstructed
+                ) ** 2
             ).item()
 
         status = (
@@ -210,62 +362,111 @@ def calculate_roi_anomaly_score(
             else "NORMAL"
         )
 
-        return round(error, 8), status
+        del roi
+        del tensor
+        del reconstructed
+
+        gc.collect()
+
+        return (
+            round(error, 8),
+            status
+        )
 
     except Exception as e:
+
         print(
-            f"WARNING: Anomaly scoring failed for "
-            f"{os.path.basename(image_path)}: {e}"
+            "WARNING: Anomaly scoring failed "
+            f"for {os.path.basename(image_path)}: {e}"
         )
+
+        gc.collect()
+
         return None, "ERROR"
 
 
 # ============================================================
-# SEVERITY ESTIMATION
+# SEVERITY
 # ============================================================
 
-def calculate_severity(bbox, img_w, img_h):
+def calculate_severity(
+    bbox,
+    img_w,
+    img_h
+):
     """
-    Estimate visual severity using the relative bounding-box area.
-
-    This is a PROXY score, not a learned physical severity label.
+    Estimate visual severity using relative
+    bounding-box area.
     """
 
     x1, y1, x2, y2 = bbox
 
-    box_width = max(0, x2 - x1)
-    box_height = max(0, y2 - y1)
+    box_width = max(
+        0,
+        x2 - x1
+    )
 
-    box_area = box_width * box_height
+    box_height = max(
+        0,
+        y2 - y1
+    )
 
-    image_area = img_w * img_h
+    box_area = (
+        box_width
+        * box_height
+    )
+
+    image_area = (
+        img_w
+        * img_h
+    )
 
     if image_area == 0:
+
         return {
             "severity_score": 0.0,
+            "area_ratio": 0.0,
             "severity": "Low"
         }
 
-    area_ratio = box_area / image_area
+    area_ratio = (
+        box_area
+        / image_area
+    )
 
-    # Convert area ratio into a 0–100 visual severity score.
-    score = min(area_ratio * 5000, 100)
+    score = min(
+        area_ratio * 5000,
+        100
+    )
 
     if score < 25:
+
         severity = "Low"
 
     elif score < 60:
+
         severity = "Medium"
 
     else:
+
         severity = "High"
 
     return {
-        "severity_score": round(score, 2),
-        "area_ratio": round(area_ratio, 6),
+        "severity_score": round(
+            score,
+            2
+        ),
+        "area_ratio": round(
+            area_ratio,
+            6
+        ),
         "severity": severity
     }
 
+
+# ============================================================
+# HEALTH SCORE
+# ============================================================
 
 def calculate_health_score(
     detections,
@@ -273,35 +474,29 @@ def calculate_health_score(
     anomaly_threshold
 ):
     """
-    Calculate a Visual Condition Score from 0-100.
-
-    Components:
-        Defect Condition   : 25%
-        Severity Condition : 45%
-        Anomaly Condition  : 30%
-
-    This is an operational visual condition score.
-    It is NOT a failure probability or RUL prediction.
+    Calculate Visual Condition Score from 0-100.
     """
 
-    # ========================================================
-    # 1. DEFECT CONDITION
-    # ========================================================
+    # --------------------------------------------------------
+    # DEFECT CONDITION
+    # --------------------------------------------------------
 
-    defect_count = len(detections)
-
-    # Smooth degradation:
-    # 0 defects -> 100
-    # 5 defects -> 50
-    # 10 defects -> approximately 33
-    defect_condition = (
-        100.0 /
-        (1.0 + defect_count / 5.0)
+    defect_count = len(
+        detections
     )
 
-    # ========================================================
-    # 2. SEVERITY CONDITION
-    # ========================================================
+    defect_condition = (
+        100.0
+        /
+        (
+            1.0
+            + defect_count / 5.0
+        )
+    )
+
+    # --------------------------------------------------------
+    # SEVERITY CONDITION
+    # --------------------------------------------------------
 
     severity_values = {
         "High": 1.0,
@@ -311,44 +506,54 @@ def calculate_health_score(
 
     severity_burden = sum(
         severity_values.get(
-            det.get("severity", "Low"),
+            det.get(
+                "severity",
+                "Low"
+            ),
             0.0
         )
         for det in detections
     )
 
-    # Smooth degradation based on severity burden.
     severity_condition = (
-        100.0 /
-        (1.0 + severity_burden / 3.0)
+        100.0
+        /
+        (
+            1.0
+            + severity_burden / 3.0
+        )
     )
 
-    # ========================================================
-    # 3. ANOMALY CONDITION
-    # ========================================================
+    # --------------------------------------------------------
+    # ANOMALY CONDITION
+    # --------------------------------------------------------
 
     if (
         anomaly_score is None
         or anomaly_threshold <= 0
     ):
+
         anomaly_condition = 100.0
 
     else:
 
         anomaly_ratio = (
-            anomaly_score /
-            anomaly_threshold
+            anomaly_score
+            / anomaly_threshold
         )
 
-        # Smooth degradation instead of hard clipping.
         anomaly_condition = (
-            100.0 /
-            (1.0 + anomaly_ratio)
+            100.0
+            /
+            (
+                1.0
+                + anomaly_ratio
+            )
         )
 
-    # ========================================================
-    # 4. WEIGHTED VISUAL CONDITION SCORE
-    # ========================================================
+    # --------------------------------------------------------
+    # WEIGHTED SCORE
+    # --------------------------------------------------------
 
     health_score = (
         0.25 * defect_condition
@@ -358,23 +563,30 @@ def calculate_health_score(
 
     health_score = max(
         0.0,
-        min(100.0, health_score)
+        min(
+            100.0,
+            health_score
+        )
     )
 
-    # ========================================================
-    # 5. STATUS
-    # ========================================================
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
 
     if health_score >= 80:
+
         status = "HEALTHY"
 
     elif health_score >= 60:
+
         status = "WARNING"
 
     elif health_score >= 40:
+
         status = "DEGRADED"
 
     else:
+
         status = "CRITICAL"
 
     return {
@@ -382,48 +594,48 @@ def calculate_health_score(
             health_score,
             2
         ),
-
         "status": status,
-
         "defect_condition": round(
             defect_condition,
             2
         ),
-
         "severity_condition": round(
             severity_condition,
             2
         ),
-
         "anomaly_condition": round(
             anomaly_condition,
             2
         ),
-
         "defect_weight": 0.25,
         "severity_weight": 0.45,
         "anomaly_weight": 0.30,
-
         "method": (
             "Normalized weighted visual "
             "condition score"
         )
     }
 
-def calculate_maintenance_priority(severity, confidence):
-    """
-    Convert visual severity + detection confidence
-    into a maintenance recommendation.
-    """
+
+# ============================================================
+# MAINTENANCE PRIORITY
+# ============================================================
+
+def calculate_maintenance_priority(
+    severity,
+    confidence
+):
 
     if severity == "High":
+
         return "IMMEDIATE INSPECTION"
 
     if severity == "Medium":
+
         return "SCHEDULE INSPECTION"
 
-    # Low severity but high confidence
     if confidence >= 0.70:
+
         return "MONITOR"
 
     return "MONITOR / VERIFY"
@@ -433,10 +645,13 @@ def calculate_maintenance_priority(severity, confidence):
 # NMS
 # ============================================================
 
-def nms_detections(detections, iou_thresh=0.5):
-    """Apply NMS across detections."""
+def nms_detections(
+    detections,
+    iou_thresh=0.5
+):
 
     if not detections:
+
         return []
 
     dets = sorted(
@@ -457,94 +672,160 @@ def nms_detections(detections, iou_thresh=0.5):
 
             kb = k["bbox"]
 
-            ix1 = max(box[0], kb[0])
-            iy1 = max(box[1], kb[1])
+            ix1 = max(
+                box[0],
+                kb[0]
+            )
 
-            ix2 = min(box[2], kb[2])
-            iy2 = min(box[3], kb[3])
+            iy1 = max(
+                box[1],
+                kb[1]
+            )
+
+            ix2 = min(
+                box[2],
+                kb[2]
+            )
+
+            iy2 = min(
+                box[3],
+                kb[3]
+            )
 
             inter = (
-                max(0, ix2 - ix1)
+                max(
+                    0,
+                    ix2 - ix1
+                )
                 *
-                max(0, iy2 - iy1)
+                max(
+                    0,
+                    iy2 - iy1
+                )
             )
 
             a1 = (
-                max(0, box[2] - box[0])
+                max(
+                    0,
+                    box[2] - box[0]
+                )
                 *
-                max(0, box[3] - box[1])
+                max(
+                    0,
+                    box[3] - box[1]
+                )
             )
 
             a2 = (
-                max(0, kb[2] - kb[0])
+                max(
+                    0,
+                    kb[2] - kb[0]
+                )
                 *
-                max(0, kb[3] - kb[1])
+                max(
+                    0,
+                    kb[3] - kb[1]
+                )
             )
 
-            union = a1 + a2 - inter
+            union = (
+                a1
+                + a2
+                - inter
+            )
 
             if union > 0:
 
-                iou = inter / union
+                iou = (
+                    inter
+                    / union
+                )
 
                 if iou > iou_thresh:
+
                     overlap = True
                     break
 
         if not overlap:
+
             keep.append(d)
 
     return keep
 
 
 # ============================================================
-# DRAWING
+# DRAW DETECTIONS
 # ============================================================
 
-def draw_detections(img_pil, detections, font_size=None):
-    """Draw clean compact detection labels."""
+def draw_detections(
+    img_pil,
+    detections,
+    font_size=None
+):
 
-    draw = ImageDraw.Draw(img_pil)
+    draw = ImageDraw.Draw(
+        img_pil
+    )
 
-    # Dynamic font size for 4K images
     if font_size is None:
+
         font_size = max(
             24,
             min(
                 42,
-                int(min(img_pil.width, img_pil.height) * 0.014)
+                int(
+                    min(
+                        img_pil.width,
+                        img_pil.height
+                    )
+                    * 0.014
+                )
             )
         )
 
     try:
+
         font = ImageFont.truetype(
             "C:/Windows/Fonts/arialbd.ttf",
             font_size
         )
-    except (IOError, OSError):
+
+    except (
+        IOError,
+        OSError
+    ):
+
         try:
+
             font = ImageFont.truetype(
                 "C:/Windows/Fonts/arial.ttf",
                 font_size
             )
-        except (IOError, OSError):
+
+        except (
+            IOError,
+            OSError
+        ):
+
             font = ImageFont.load_default()
 
     for det in detections:
 
         x1, y1, x2, y2 = det["bbox"]
 
-        cls = det.get("class", 0)
-        conf = det.get("confidence", 0.0)
+        cls = det.get(
+            "class",
+            0
+        )
+
+        conf = det.get(
+            "confidence",
+            0.0
+        )
 
         severity = det.get(
             "severity",
             "Unknown"
-        )
-
-        severity_score = det.get(
-            "severity_score",
-            0
         )
 
         class_name = CLASS_NAMES.get(
@@ -558,27 +839,73 @@ def draw_detections(img_pil, detections, font_size=None):
         )
 
         # ----------------------------------------------------
-        # Bounding box
+        # BOUNDING BOX
         # ----------------------------------------------------
 
-        x1 = int(max(0, min(img_pil.width - 1, x1)))
-        y1 = int(max(0, min(img_pil.height - 1, y1)))
-        x2 = int(max(0, min(img_pil.width - 1, x2)))
-        y2 = int(max(0, min(img_pil.height - 1, y2)))
+        x1 = int(
+            max(
+                0,
+                min(
+                    img_pil.width - 1,
+                    x1
+                )
+            )
+        )
+
+        y1 = int(
+            max(
+                0,
+                min(
+                    img_pil.height - 1,
+                    y1
+                )
+            )
+        )
+
+        x2 = int(
+            max(
+                0,
+                min(
+                    img_pil.width - 1,
+                    x2
+                )
+            )
+        )
+
+        y2 = int(
+            max(
+                0,
+                min(
+                    img_pil.height - 1,
+                    y2
+                )
+            )
+        )
 
         box_width = max(
             3,
-            int(min(img_pil.width, img_pil.height) * 0.0025)
+            int(
+                min(
+                    img_pil.width,
+                    img_pil.height
+                )
+                * 0.0025
+            )
         )
 
         draw.rectangle(
-            [x1, y1, x2, y2],
+            [
+                x1,
+                y1,
+                x2,
+                y2
+            ],
             outline=color,
             width=box_width
         )
 
         # ----------------------------------------------------
-        # Compact label
+        # LABEL
         # ----------------------------------------------------
 
         label = (
@@ -594,11 +921,13 @@ def draw_detections(img_pil, detections, font_size=None):
         )
 
         text_width = (
-            text_box[2] - text_box[0]
+            text_box[2]
+            - text_box[0]
         )
 
         text_height = (
-            text_box[3] - text_box[1]
+            text_box[3]
+            - text_box[1]
         )
 
         padding_x = 10
@@ -614,10 +943,6 @@ def draw_detections(img_pil, detections, font_size=None):
             + padding_y * 2
         )
 
-        # ----------------------------------------------------
-        # Label position
-        # ----------------------------------------------------
-
         label_x = x1
 
         label_y = (
@@ -626,29 +951,33 @@ def draw_detections(img_pil, detections, font_size=None):
             - 5
         )
 
-        # Put below box if there isn't enough room above
         if label_y < 0:
+
             label_y = y2 + 5
 
-        # Keep label inside image horizontally
-        if label_x + label_width > img_pil.width:
+        if (
+            label_x
+            + label_width
+            > img_pil.width
+        ):
+
             label_x = (
                 img_pil.width
                 - label_width
                 - 5
             )
 
-        # Keep label inside image vertically
-        if label_y + label_height > img_pil.height:
+        if (
+            label_y
+            + label_height
+            > img_pil.height
+        ):
+
             label_y = (
                 img_pil.height
                 - label_height
                 - 5
             )
-
-        # ----------------------------------------------------
-        # Label background
-        # ----------------------------------------------------
 
         draw.rectangle(
             [
@@ -660,7 +989,6 @@ def draw_detections(img_pil, detections, font_size=None):
             fill=(20, 20, 20)
         )
 
-        # Colored top border
         draw.rectangle(
             [
                 label_x,
@@ -670,10 +998,6 @@ def draw_detections(img_pil, detections, font_size=None):
             ],
             fill=color
         )
-
-        # ----------------------------------------------------
-        # Label text
-        # ----------------------------------------------------
 
         draw.text(
             (
@@ -689,6 +1013,92 @@ def draw_detections(img_pil, detections, font_size=None):
 
 
 # ============================================================
+# GRAD-CAM
+# ============================================================
+
+def run_gradcam_if_enabled(
+    model,
+    image_path,
+    output_path
+):
+    """
+    Generate Grad-CAM only when explicitly enabled.
+
+    This function imports gradcam_utils lazily so that
+    Render does not load Grad-CAM during normal startup.
+    """
+
+    if not ENABLE_GRADCAM:
+
+        print(
+            "Grad-CAM disabled for memory-safe deployment."
+        )
+
+        return (
+            "DISABLED",
+            None,
+            None
+        )
+
+    try:
+
+        # IMPORTANT:
+        # Lazy import.
+        from gradcam_utils import (
+            generate_gradcam
+        )
+
+        print(
+            f"Generating Grad-CAM for: "
+            f"{image_path}"
+        )
+
+        generate_gradcam(
+            model=model,
+            image_path=image_path,
+            output_path=output_path
+        )
+
+        if os.path.isfile(
+            output_path
+        ):
+
+            return (
+                "GENERATED",
+                output_path,
+                None
+            )
+
+        return (
+            "FAILED",
+            None,
+            "Grad-CAM output was not created."
+        )
+
+    except Exception as e:
+
+        error = (
+            f"{type(e).__name__}: {e}"
+        )
+
+        print(
+            "Grad-CAM failed:"
+        )
+
+        print(error)
+
+        return (
+            "FAILED",
+            None,
+            error
+        )
+
+    finally:
+
+        gc.collect()
+
+
+# ============================================================
 # PIPELINE
 # ============================================================
 
@@ -701,20 +1111,47 @@ def run_pipeline(
     tta=False
 ):
 
-    """Run complete BeltGuard inference pipeline."""
+    """
+    Run complete BeltGuard inference pipeline.
+
+    Grad-CAM is disabled by default to keep memory usage
+    low enough for Render's 512 MB instance.
+    """
 
     os.makedirs(
         output_dir,
         exist_ok=True
     )
 
-    # --------------------------------------------------------
-    # MODEL
-    # --------------------------------------------------------
+    print(
+        "=========================================="
+    )
+
+    print(
+        "BeltGuard Pipeline Starting"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        f"Grad-CAM enabled: {ENABLE_GRADCAM}"
+    )
+
+    print(
+        f"Device: {DEVICE}"
+    )
+
+    # ========================================================
+    # MODEL PATH
+    # ========================================================
 
     if model_path is None:
 
-        script_dir = Path(__file__).resolve().parent
+        script_dir = (
+            Path(__file__).resolve().parent
+        )
 
         candidates = [
 
@@ -755,47 +1192,81 @@ def run_pipeline(
 
             if candidate.exists():
 
-                model_path = str(candidate)
+                model_path = str(
+                    candidate
+                )
 
                 break
 
-        if model_path is None:
+    if model_path is None:
 
-            print(
-                "ERROR: No model weights found."
-            )
+        print(
+            "ERROR: No model weights found."
+        )
 
-            return
+        return None
+
+    # ========================================================
+    # LOAD YOLO
+    # ========================================================
 
     print(
         f"Loading model: {model_path}"
     )
 
-    model = YOLO(model_path)
+    model = YOLO(
+        model_path
+    )
 
-    # --------------------------------------------------------
-    # ROI AUTOENCODER
-    # --------------------------------------------------------
+    # Force CPU.
+    try:
 
-    anomaly_model, anomaly_device = load_anomaly_model()
+        model.to(DEVICE)
 
-    # --------------------------------------------------------
-    # IMAGES
-    # --------------------------------------------------------
+    except Exception:
+
+        pass
+
+    # ========================================================
+    # ANOMALY MODEL
+    # ========================================================
+
+    anomaly_model = None
+    anomaly_device = torch.device(
+        "cpu"
+    )
+
+    # Only load anomaly model when ROI/anomaly processing
+    # is actually needed.
+    if use_roi:
+
+        anomaly_model, anomaly_device = (
+            load_anomaly_model()
+        )
+
+    # ========================================================
+    # IMAGE LIST
+    # ========================================================
 
     image_files = sorted(
         [
             f
-            for f in os.listdir(image_dir)
+            for f in os.listdir(
+                image_dir
+            )
             if f.lower().endswith(
-                (".jpg", ".jpeg", ".png")
+                (
+                    ".jpg",
+                    ".jpeg",
+                    ".png"
+                )
             )
         ]
     )
 
     print(
-        f"Processing {len(image_files)} images "
-        f"from {image_dir}"
+        f"Processing {len(image_files)} "
+        f"images from {image_dir}"
     )
 
     labels_dir_default = os.path.join(
@@ -807,13 +1278,18 @@ def run_pipeline(
     total_detections = 0
 
     images_with_detections = 0
+
     anomalous_images = 0
 
-    # --------------------------------------------------------
+    # ========================================================
     # IMAGE LOOP
-    # --------------------------------------------------------
+    # ========================================================
 
     for img_file in image_files:
+
+        print(
+            f"\nProcessing: {img_file}"
+        )
 
         img_path = os.path.join(
             image_dir,
@@ -824,60 +1300,49 @@ def run_pipeline(
             img_file
         )[0]
 
-        img_pil = Image.open(img_path)
-
-        img_w, img_h = img_pil.size
-
-        img_cv = cv2.imread(img_path)
-
         # ----------------------------------------------------
-        # GRAD-CAM++ EXPLAINABILITY
+        # READ IMAGE
         # ----------------------------------------------------
-        # Generate the explanation for the same original image
-        # used for this inspection. Failure of explainability
-        # must never stop the main inspection pipeline.
-        gradcam_output_path = os.path.join(
-            output_dir,
-            base_name + "_gradcam.jpg"
+
+        img_cv = cv2.imread(
+            img_path
         )
 
-        gradcam_error = None
+        if img_cv is None:
 
-        try:
-            print(f"\nGenerating Grad-CAM++ for: {img_file}")
-            generate_gradcam(
-                model=model,
-                image_path=img_path,
-                output_path=gradcam_output_path
+            print(
+                f"WARNING: Could not read "
+                f"{img_file}"
             )
 
-            if os.path.isfile(gradcam_output_path):
-                gradcam_status = "GENERATED"
-                print(
-                    f"Grad-CAM++ file verified: "
-                    f"{gradcam_output_path}"
-                )
-            else:
-                gradcam_status = "FAILED"
-                gradcam_error = (
-                    "Grad-CAM++ completed but the output image "
-                    "was not created."
-                )
-                gradcam_output_path = None
+            continue
 
-        except Exception as e:
-            gradcam_status = "FAILED"
-            gradcam_output_path = None
-            gradcam_error = f"{type(e).__name__}: {e}"
-
-            print("\n========================================")
-            print("Grad-CAM++ FAILED")
-            print(f"Image: {img_file}")
-            print(f"Error: {gradcam_error}")
-            print("========================================\n")
+        img_h, img_w = (
+            img_cv.shape[:2]
+        )
 
         # ----------------------------------------------------
-        # ROI AUTOENCODER ANOMALY SCORE
+        # GRAD-CAM
+        # ----------------------------------------------------
+
+        gradcam_output_path = os.path.join(
+            output_dir,
+            base_name
+            + "_gradcam.jpg"
+        )
+
+        (
+            gradcam_status,
+            gradcam_file,
+            gradcam_error
+        ) = run_gradcam_if_enabled(
+            model=model,
+            image_path=img_path,
+            output_path=gradcam_output_path
+        )
+
+        # ----------------------------------------------------
+        # ROI LABEL
         # ----------------------------------------------------
 
         anomaly_label_path = os.path.join(
@@ -885,26 +1350,33 @@ def run_pipeline(
             base_name + ".txt"
         )
 
-        # Use ROI anomaly detection only when a matching
-        # belt ROI label is available.
-        if os.path.exists(anomaly_label_path):
+        # ----------------------------------------------------
+        # ROI ANOMALY
+        # ----------------------------------------------------
 
-            roi_anomaly_score, anomaly_status = (
-                calculate_roi_anomaly_score(
-                    anomaly_model,
-                    anomaly_device,
-                    img_path,
-                    anomaly_label_path
-                )
+        roi_anomaly_score = None
+
+        anomaly_status = "UNAVAILABLE"
+
+        if (
+            use_roi
+            and os.path.exists(
+                anomaly_label_path
+            )
+        ):
+
+            (
+                roi_anomaly_score,
+                anomaly_status
+            ) = calculate_roi_anomaly_score(
+                anomaly_model,
+                anomaly_device,
+                img_path,
+                anomaly_label_path
             )
 
-        else:
-
-            roi_anomaly_score = None
-            anomaly_status = "UNAVAILABLE"
-
         # ----------------------------------------------------
-        # ROI
+        # BELT ROI MASK
         # ----------------------------------------------------
 
         belt_mask = None
@@ -913,8 +1385,7 @@ def run_pipeline(
 
             label_file = (
                 base_name
-                +
-                ".txt"
+                + ".txt"
             )
 
             search_dirs = [
@@ -927,7 +1398,9 @@ def run_pipeline(
 
                 labels_dir_default,
 
-                os.path.dirname(img_path)
+                os.path.dirname(
+                    img_path
+                )
             ]
 
             for search_dir in search_dirs:
@@ -949,10 +1422,12 @@ def run_pipeline(
 
                     if polygon is not None:
 
-                        belt_mask = create_belt_mask(
-                            img_w,
-                            img_h,
-                            polygon
+                        belt_mask = (
+                            create_belt_mask(
+                                img_w,
+                                img_h,
+                                polygon
+                            )
                         )
 
                     break
@@ -972,312 +1447,447 @@ def run_pipeline(
 
             masked_cv = img_cv
 
-        # ----------------------------------------------------
+        # ====================================================
         # YOLO INFERENCE
-        # ----------------------------------------------------
+        # ====================================================
 
         all_detections = []
 
-        results = model.predict(
-            source=masked_cv,
-            conf=conf_threshold,
-            verbose=False
-        )
+        try:
 
-        for r in results:
+            results = model.predict(
+                source=masked_cv,
+                conf=conf_threshold,
+                imgsz=640,
+                device=DEVICE,
+                verbose=False,
+                stream=True
+            )
 
-            for box in r.boxes:
+            for r in results:
 
-                x1, y1, x2, y2 = (
-                    box.xyxy[0].tolist()
-                )
+                if r.boxes is None:
+                    continue
 
-                cls = int(
-                    box.cls[0].item()
-                )
+                for box in r.boxes:
 
-                conf = float(
-                    box.conf[0].item()
-                )
+                    x1, y1, x2, y2 = (
+                        box.xyxy[0].tolist()
+                    )
 
-                bbox = [
-                    round(x1),
-                    round(y1),
-                    round(x2),
-                    round(y2)
-                ]
+                    cls = int(
+                        box.cls[0].item()
+                    )
 
-                severity_info = calculate_severity(
-                    bbox,
-                    img_w,
-                    img_h
-                )
+                    conf = float(
+                        box.conf[0].item()
+                    )
 
-                maintenance = calculate_maintenance_priority(
-                    severity_info["severity"],
-                    conf
-                )
+                    bbox = [
+                        round(x1),
+                        round(y1),
+                        round(x2),
+                        round(y2)
+                    ]
 
-                all_detections.append({
+                    severity_info = (
+                        calculate_severity(
+                            bbox,
+                            img_w,
+                            img_h
+                        )
+                    )
 
-                    "class": cls,
+                    maintenance = (
+                        calculate_maintenance_priority(
+                            severity_info[
+                                "severity"
+                            ],
+                            conf
+                        )
+                    )
 
-                    "class_name": CLASS_NAMES.get(
-                        cls,
-                        f"cls{cls}"
-                    ),
+                    all_detections.append(
+                        {
+                            "class": cls,
 
-                    "confidence": round(
-                        conf,
-                        4
-                    ),
+                            "class_name":
+                                CLASS_NAMES.get(
+                                    cls,
+                                    f"cls{cls}"
+                                ),
 
-                    "bbox": bbox,
+                            "confidence":
+                                round(
+                                    conf,
+                                    4
+                                ),
 
-                    "severity_score":
-                        severity_info[
-                            "severity_score"
-                        ],
+                            "bbox":
+                                bbox,
 
-                    "area_ratio":
-                        severity_info[
-                            "area_ratio"
-                        ],
+                            "severity_score":
+                                severity_info[
+                                    "severity_score"
+                                ],
 
-                    "severity":
-                        severity_info[
-                            "severity"
-                        ],
+                            "area_ratio":
+                                severity_info[
+                                    "area_ratio"
+                                ],
 
-                    "maintenance_priority":
-                        maintenance
-                })
+                            "severity":
+                                severity_info[
+                                    "severity"
+                                ],
 
-        # ----------------------------------------------------
+                            "maintenance_priority":
+                                maintenance
+                        }
+                    )
+
+            del results
+
+        except Exception as e:
+
+            print(
+                "WARNING: YOLO inference failed:"
+            )
+
+            print(e)
+
+        # ====================================================
         # TTA
-        # ----------------------------------------------------
+        # ====================================================
 
         if tta:
+
+            # ------------------------------------------------
+            # HORIZONTAL FLIP
+            # ------------------------------------------------
 
             flipped = cv2.flip(
                 masked_cv,
                 1
             )
 
-            results_flip = model.predict(
-                source=flipped,
-                conf=conf_threshold,
-                verbose=False
-            )
+            try:
 
-            for r in results_flip:
+                results_flip = model.predict(
+                    source=flipped,
+                    conf=conf_threshold,
+                    imgsz=640,
+                    device=DEVICE,
+                    verbose=False,
+                    stream=True
+                )
 
-                for box in r.boxes:
+                for r in results_flip:
 
-                    x1, y1, x2, y2 = (
-                        box.xyxy[0].tolist()
-                    )
+                    if r.boxes is None:
+                        continue
 
-                    x1_new = img_w - x2
-                    x2_new = img_w - x1
+                    for box in r.boxes:
 
-                    cls = int(
-                        box.cls[0].item()
-                    )
+                        x1, y1, x2, y2 = (
+                            box.xyxy[0].tolist()
+                        )
 
-                    conf = float(
-                        box.conf[0].item()
-                    )
+                        x1_new = (
+                            img_w - x2
+                        )
 
-                    bbox = [
-                        round(x1_new),
-                        round(y1),
-                        round(x2_new),
-                        round(y2)
-                    ]
+                        x2_new = (
+                            img_w - x1
+                        )
 
-                    severity_info = calculate_severity(
-                        bbox,
-                        img_w,
-                        img_h
-                    )
+                        cls = int(
+                            box.cls[0].item()
+                        )
 
-                    maintenance = calculate_maintenance_priority(
-                        severity_info["severity"],
-                        conf
-                    )
+                        conf = float(
+                            box.conf[0].item()
+                        )
 
-                    all_detections.append({
+                        bbox = [
+                            round(x1_new),
+                            round(y1),
+                            round(x2_new),
+                            round(y2)
+                        ]
 
-                        "class": cls,
+                        severity_info = (
+                            calculate_severity(
+                                bbox,
+                                img_w,
+                                img_h
+                            )
+                        )
 
-                        "class_name":
-                            CLASS_NAMES.get(
-                                cls,
-                                f"cls{cls}"
-                            ),
+                        maintenance = (
+                            calculate_maintenance_priority(
+                                severity_info[
+                                    "severity"
+                                ],
+                                conf
+                            )
+                        )
 
-                        "confidence":
-                            round(conf, 4),
+                        all_detections.append(
+                            {
+                                "class": cls,
 
-                        "bbox": bbox,
+                                "class_name":
+                                    CLASS_NAMES.get(
+                                        cls,
+                                        f"cls{cls}"
+                                    ),
 
-                        "severity_score":
-                            severity_info[
-                                "severity_score"
-                            ],
+                                "confidence":
+                                    round(
+                                        conf,
+                                        4
+                                    ),
 
-                        "area_ratio":
-                            severity_info[
-                                "area_ratio"
-                            ],
+                                "bbox":
+                                    bbox,
 
-                        "severity":
-                            severity_info[
-                                "severity"
-                            ],
+                                "severity_score":
+                                    severity_info[
+                                        "severity_score"
+                                    ],
 
-                        "maintenance_priority":
-                            maintenance
-                    })
+                                "area_ratio":
+                                    severity_info[
+                                        "area_ratio"
+                                    ],
+
+                                "severity":
+                                    severity_info[
+                                        "severity"
+                                    ],
+
+                                "maintenance_priority":
+                                    maintenance
+                            }
+                        )
+
+                del results_flip
+
+            except Exception as e:
+
+                print(
+                    "WARNING: Horizontal TTA failed:"
+                )
+
+                print(e)
+
+            del flipped
+
+            # ------------------------------------------------
+            # VERTICAL + HORIZONTAL FLIP
+            # ------------------------------------------------
 
             flipped_v = cv2.flip(
                 masked_cv,
                 -1
             )
 
-            results_flip_v = model.predict(
-                source=flipped_v,
-                conf=conf_threshold,
-                verbose=False
+            try:
+
+                results_flip_v = model.predict(
+                    source=flipped_v,
+                    conf=conf_threshold,
+                    imgsz=640,
+                    device=DEVICE,
+                    verbose=False,
+                    stream=True
+                )
+
+                for r in results_flip_v:
+
+                    if r.boxes is None:
+                        continue
+
+                    for box in r.boxes:
+
+                        x1, y1, x2, y2 = (
+                            box.xyxy[0].tolist()
+                        )
+
+                        x1_new = (
+                            img_w - x2
+                        )
+
+                        x2_new = (
+                            img_w - x1
+                        )
+
+                        y1_new = (
+                            img_h - y2
+                        )
+
+                        y2_new = (
+                            img_h - y1
+                        )
+
+                        cls = int(
+                            box.cls[0].item()
+                        )
+
+                        conf = float(
+                            box.conf[0].item()
+                        )
+
+                        bbox = [
+                            round(x1_new),
+                            round(y1_new),
+                            round(x2_new),
+                            round(y2_new)
+                        ]
+
+                        severity_info = (
+                            calculate_severity(
+                                bbox,
+                                img_w,
+                                img_h
+                            )
+                        )
+
+                        maintenance = (
+                            calculate_maintenance_priority(
+                                severity_info[
+                                    "severity"
+                                ],
+                                conf
+                            )
+                        )
+
+                        all_detections.append(
+                            {
+                                "class": cls,
+
+                                "class_name":
+                                    CLASS_NAMES.get(
+                                        cls,
+                                        f"cls{cls}"
+                                    ),
+
+                                "confidence":
+                                    round(
+                                        conf,
+                                        4
+                                    ),
+
+                                "bbox":
+                                    bbox,
+
+                                "severity_score":
+                                    severity_info[
+                                        "severity_score"
+                                    ],
+
+                                "area_ratio":
+                                    severity_info[
+                                        "area_ratio"
+                                    ],
+
+                                "severity":
+                                    severity_info[
+                                        "severity"
+                                    ],
+
+                                "maintenance_priority":
+                                    maintenance
+                            }
+                        )
+
+                del results_flip_v
+
+            except Exception as e:
+
+                print(
+                    "WARNING: Vertical TTA failed:"
+                )
+
+                print(e)
+
+            del flipped_v
+
+            # ------------------------------------------------
+            # NMS
+            # ------------------------------------------------
+
+            all_detections = (
+                nms_detections(
+                    all_detections,
+                    iou_thresh=0.5
+                )
             )
 
-            for r in results_flip_v:
-
-                for box in r.boxes:
-
-                    x1, y1, x2, y2 = (
-                        box.xyxy[0].tolist()
-                    )
-
-                    x1_new = img_w - x2
-                    x2_new = img_w - x1
-
-                    y1_new = img_h - y2
-                    y2_new = img_h - y1
-
-                    cls = int(
-                        box.cls[0].item()
-                    )
-
-                    conf = float(
-                        box.conf[0].item()
-                    )
-
-                    bbox = [
-                        round(x1_new),
-                        round(y1_new),
-                        round(x2_new),
-                        round(y2_new)
-                    ]
-
-                    severity_info = calculate_severity(
-                        bbox,
-                        img_w,
-                        img_h
-                    )
-
-                    maintenance = calculate_maintenance_priority(
-                        severity_info["severity"],
-                        conf
-                    )
-
-                    all_detections.append({
-
-                        "class": cls,
-
-                        "class_name":
-                            CLASS_NAMES.get(
-                                cls,
-                                f"cls{cls}"
-                            ),
-
-                        "confidence":
-                            round(conf, 4),
-
-                        "bbox": bbox,
-
-                        "severity_score":
-                            severity_info[
-                                "severity_score"
-                            ],
-
-                        "area_ratio":
-                            severity_info[
-                                "area_ratio"
-                            ],
-
-                        "severity":
-                            severity_info[
-                                "severity"
-                            ],
-
-                        "maintenance_priority":
-                            maintenance
-                    })
-
-            all_detections = nms_detections(
-                all_detections,
-                iou_thresh=0.5
-            )
-
-        # ----------------------------------------------------
+        # ====================================================
         # ROI FILTER
-        # ----------------------------------------------------
+        # ====================================================
 
         if belt_mask is not None:
 
-            all_detections = filter_detections_in_belt(
-                all_detections,
-                belt_mask
+            all_detections = (
+                filter_detections_in_belt(
+                    all_detections,
+                    belt_mask
+                )
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # ANOMALY COUNTER
-        # ----------------------------------------------------
+        # ====================================================
 
-        if anomaly_status == "ANOMALOUS":
+        if (
+            anomaly_status
+            == "ANOMALOUS"
+        ):
+
             anomalous_images += 1
 
-        # ----------------------------------------------------
+        # ====================================================
         # HEALTH SCORE
-        # ----------------------------------------------------
+        # ====================================================
 
-        health_info = calculate_health_score(
-            all_detections,
-            roi_anomaly_score,
-            ANOMALY_THRESHOLD
+        health_info = (
+            calculate_health_score(
+                all_detections,
+                roi_anomaly_score,
+                ANOMALY_THRESHOLD
+            )
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # SORT
-        # ----------------------------------------------------
+        # ====================================================
 
         all_detections.sort(
-            key=lambda d: d["confidence"],
+            key=lambda d:
+                d["confidence"],
             reverse=True
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # ANNOTATED IMAGE
-        # ----------------------------------------------------
+        # ====================================================
 
-        # Draw directly on the existing PIL image instead of
-        # creating a full-resolution copy. This avoids a large
-        # extra memory allocation for 4K images in Streamlit.
-        annotated_img = draw_detections(
-            img_pil,
-            all_detections
+        # Convert only when needed.
+        img_pil = Image.fromarray(
+            cv2.cvtColor(
+                img_cv,
+                cv2.COLOR_BGR2RGB
+            )
+        )
+
+        annotated_img = (
+            draw_detections(
+                img_pil,
+                all_detections
+            )
         )
 
         out_img_path = os.path.join(
@@ -1285,10 +1895,13 @@ def run_pipeline(
             base_name + ".jpg"
         )
 
-        # JPEG does not support RGBA/P images.
-        # Convert the annotated image to RGB before saving.
         if annotated_img.mode != "RGB":
-            annotated_img = annotated_img.convert("RGB")
+
+            annotated_img = (
+                annotated_img.convert(
+                    "RGB"
+                )
+            )
 
         annotated_img.save(
             out_img_path,
@@ -1296,61 +1909,114 @@ def run_pipeline(
             optimize=True
         )
 
-        # Release the large PIL/OpenCV image objects before the
-        # next image is processed.
-        try:
-            img_pil.close()
-        except Exception:
-            pass
-        del annotated_img
-        del img_cv
-
-        # ----------------------------------------------------
+        # ====================================================
         # JSON
-        # ----------------------------------------------------
+        # ====================================================
 
         det_json = {
 
-            "image": img_file,
+            "image":
+                img_file,
 
-            "image_width": img_w,
+            "image_width":
+                img_w,
 
-            "image_height": img_h,
+            "image_height":
+                img_h,
 
-            "model": model_path,
+            "model":
+                model_path,
 
             "confidence_threshold":
                 conf_threshold,
 
             "anomaly_detection": {
-                "model": str(ANOMALY_MODEL_PATH),
-                "threshold": ANOMALY_THRESHOLD,
-                "anomaly_score": roi_anomaly_score,
-                "status": anomaly_status,
-                "method": "ROI convolutional autoencoder"
+
+                "model":
+                    str(
+                        ANOMALY_MODEL_PATH
+                    ),
+
+                "threshold":
+                    ANOMALY_THRESHOLD,
+
+                "anomaly_score":
+                    roi_anomaly_score,
+
+                "status":
+                    anomaly_status,
+
+                "method":
+                    "ROI convolutional autoencoder"
             },
 
             "health": {
-                "score": health_info["score"],
-                "status": health_info["status"],
-                "defect_condition": health_info["defect_condition"],
-                "severity_condition": health_info["severity_condition"],
-                "anomaly_condition": health_info["anomaly_condition"],
-                "defect_weight": health_info["defect_weight"],
-                "severity_weight": health_info["severity_weight"],
-                "anomaly_weight": health_info["anomaly_weight"],
-                "method": health_info["method"]
+
+                "score":
+                    health_info[
+                        "score"
+                    ],
+
+                "status":
+                    health_info[
+                        "status"
+                    ],
+
+                "defect_condition":
+                    health_info[
+                        "defect_condition"
+                    ],
+
+                "severity_condition":
+                    health_info[
+                        "severity_condition"
+                    ],
+
+                "anomaly_condition":
+                    health_info[
+                        "anomaly_condition"
+                    ],
+
+                "defect_weight":
+                    health_info[
+                        "defect_weight"
+                    ],
+
+                "severity_weight":
+                    health_info[
+                        "severity_weight"
+                    ],
+
+                "anomaly_weight":
+                    health_info[
+                        "anomaly_weight"
+                    ],
+
+                "method":
+                    health_info[
+                        "method"
+                    ]
             },
 
             "explainability": {
-                "method": "Grad-CAM++",
-                "status": gradcam_status,
-                "output": (
-                    os.path.basename(gradcam_output_path)
-                    if gradcam_output_path is not None
-                    else None
-                ),
-                "error": gradcam_error
+
+                "method":
+                    "Grad-CAM",
+
+                "status":
+                    gradcam_status,
+
+                "output":
+                    (
+                        os.path.basename(
+                            gradcam_file
+                        )
+                        if gradcam_file
+                        else None
+                    ),
+
+                "error":
+                    gradcam_error
             },
 
             "detections":
@@ -1373,21 +2039,56 @@ def run_pipeline(
                 indent=2
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # COUNTERS
-        # ----------------------------------------------------
+        # ====================================================
 
-        total_detections += len(
-            all_detections
+        total_detections += (
+            len(all_detections)
         )
 
         if all_detections:
 
             images_with_detections += 1
 
-    # --------------------------------------------------------
+        # ====================================================
+        # MEMORY CLEANUP
+        # ====================================================
+
+        del img_cv
+        del masked_cv
+        del img_pil
+        del annotated_img
+
+        if belt_mask is not None:
+
+            del belt_mask
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+
+            torch.cuda.empty_cache()
+
+    # ========================================================
+    # FINAL CLEANUP
+    # ========================================================
+
+    if anomaly_model is not None:
+
+        del anomaly_model
+
+    del model
+
+    gc.collect()
+
+    if torch.cuda.is_available():
+
+        torch.cuda.empty_cache()
+
+    # ========================================================
     # SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     print(
         "\n=========================================="
@@ -1427,19 +2128,39 @@ def run_pipeline(
     )
 
     print(
-        "Health score method: "
-        "Composite operational scoring"
+        f"Confidence threshold: "
+        f"{conf_threshold}"
     )
 
     print(
-        f"Confidence threshold: "
-        f"{conf_threshold}"
+        f"Grad-CAM enabled: "
+        f"{ENABLE_GRADCAM}"
     )
 
     print(
         f"Output saved to: "
         f"{output_dir}"
     )
+
+    return {
+        "images_processed":
+            len(image_files),
+
+        "total_detections":
+            total_detections,
+
+        "images_with_detections":
+            images_with_detections,
+
+        "anomalous_images":
+            anomalous_images,
+
+        "gradcam_enabled":
+            ENABLE_GRADCAM,
+
+        "output_dir":
+            output_dir
+    }
 
 
 # ============================================================
@@ -1450,7 +2171,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=
-        "BeltGuard conveyor belt monitoring pipeline"
+        "BeltGuard conveyor belt "
+        "monitoring pipeline"
     )
 
     parser.add_argument(
@@ -1484,7 +2206,7 @@ def main():
     parser.add_argument(
         "--roi",
         action="store_true",
-        help="Enable belt ROI masking"
+        help="Enable belt ROI masking and anomaly detection"
     )
 
     parser.add_argument(
@@ -1494,6 +2216,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # ========================================================
+    # VALIDATE IMAGE DIRECTORY
+    # ========================================================
 
     if not os.path.isdir(
         args.image_dir
@@ -1506,18 +2232,16 @@ def main():
 
         return
 
+    # ========================================================
+    # RUN
+    # ========================================================
+
     run_pipeline(
-
         image_dir=args.image_dir,
-
         output_dir=args.output_dir,
-
         model_path=args.model,
-
         conf_threshold=args.conf,
-
         use_roi=args.roi,
-
         tta=args.tta
     )
 
